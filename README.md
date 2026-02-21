@@ -1,5 +1,9 @@
 # Sabueso — Anticipatory Guest Report
 
+<img src="assets/sabueso.png" alt="Sabueso mascot" width="96">
+
+> **Sabueso** (Spanish) — *bloodhound*. A dog bred to track scents across long distances, renowned for its relentless nose and ability to follow a trail no matter how cold. Here, Sabueso hunts down public information about arriving guests so staff at The Vines of Mendoza can greet every visitor with a personal touch.
+
 Sabueso automatically generates a guest intelligence briefing for [The Vines of Mendoza](https://www.vinesofmendoza.com/). Every Monday and Thursday at 08:00 ART it:
 
 1. Queries Salesforce for guests **currently on property** (checked in within the last 7 days) and **arriving in the next 7 days**
