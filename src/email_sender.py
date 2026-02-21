@@ -1,19 +1,15 @@
 """Send HTML emails via Gmail API with OAuth 2.0."""
 
 import base64
-import json
 import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 
-from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-
-load_dotenv()
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 TOKEN_CACHE = Path(__file__).parent.parent / ".gmail_token.json"
