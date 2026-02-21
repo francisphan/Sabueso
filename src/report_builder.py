@@ -10,20 +10,30 @@ h1 { font-size: 22px; color: #1a1a2e; margin-bottom: 4px; }
 .card { background: #ffffff; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;
         box-shadow: 0 1px 4px rgba(0,0,0,.08); }
 .card-header { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 12px; }
-.photo { width: 72px; height: 72px; border-radius: 50%; object-fit: cover;
+.photo { width: 96px; height: 96px; border-radius: 50%; object-fit: cover;
          border: 2px solid #e0e0e0; flex-shrink: 0; }
-.photo-placeholder { width: 72px; height: 72px; border-radius: 50%;
+.photo-placeholder { width: 96px; height: 96px; border-radius: 50%;
                      background: #e8eaf6; display: flex; align-items: center;
-                     justify-content: center; font-size: 28px; flex-shrink: 0; }
+                     justify-content: center; font-size: 36px; flex-shrink: 0; }
 .name { font-size: 18px; font-weight: bold; color: #1a1a2e; margin: 0 0 4px; }
 .meta { font-size: 13px; color: #666; margin: 0; line-height: 1.6; }
-.summary { font-size: 14px; line-height: 1.65; margin-bottom: 12px; }
+.summary { font-size: 14px; line-height: 1.65; margin-bottom: 6px; }
+.summary-es { font-size: 13px; line-height: 1.65; color: #666; font-style: italic; margin-bottom: 12px; }
 .links-label { font-size: 12px; font-weight: bold; text-transform: uppercase;
                letter-spacing: .05em; color: #888; margin-bottom: 4px; }
 .links { list-style: none; padding: 0; margin: 0; }
 .links li { margin-bottom: 4px; }
 .links a { color: #3949ab; font-size: 13px; text-decoration: none; }
 .links a:hover { text-decoration: underline; }
+.badge { display: inline-block; font-size: 11px; font-weight: bold; padding: 2px 8px;
+         border-radius: 10px; margin-left: 8px; vertical-align: middle; }
+.on-property { background: #e3f2fd; color: #1565c0; }
+.confidence { display: inline-block; font-size: 11px; font-weight: bold; padding: 2px 8px;
+              border-radius: 10px; margin-left: 8px; vertical-align: middle; }
+.confidence-high { background: #e8f5e9; color: #2e7d32; }
+.confidence-med  { background: #fff8e1; color: #f57f17; }
+.confidence-low  { background: #ffebee; color: #c62828; }
+.confidence-reason { font-size: 11px; color: #999; margin: -8px 0 10px; font-style: italic; }
 .empty { text-align: center; padding: 48px 0; color: #999; font-size: 15px; }
 .footer { text-align: center; font-size: 11px; color: #bbb; margin-top: 32px; }
 """
@@ -44,13 +54,28 @@ def _guest_card(guest: dict) -> str:
     full_name = f"{guest.get('first_name', '')} {guest.get('last_name', '')}".strip() or "Unknown Guest"
     photo_url = profile.get("photo_url")
     summary = profile.get("summary", "")
+    summary_es = profile.get("summary_es", "")
     links = profile.get("links", [])
+    confidence = profile.get("confidence", 0)
+    confidence_reason = profile.get("confidence_reason", "")
+    if confidence >= 8:
+        conf_class, conf_label = "confidence-high", f"Confidence: {confidence}/10"
+    elif confidence >= 5:
+        conf_class, conf_label = "confidence-med", f"Confidence: {confidence}/10"
+    else:
+        conf_class, conf_label = "confidence-low", f"Confidence: {confidence}/10"
+
+    # Determine if guest is currently on property
+    today = date.today().isoformat()
+    check_in_raw = guest.get("check_in", "")
+    check_out_raw = guest.get("check_out", "")
+    on_property = bool(check_in_raw and check_out_raw and check_in_raw < today <= check_out_raw)
 
     location_parts = [guest.get("city", ""), guest.get("state", ""), guest.get("country", "")]
     location = ", ".join(p for p in location_parts if p) or "—"
 
-    check_in = _fmt_date(guest.get("check_in", ""))
-    check_out = _fmt_date(guest.get("check_out", ""))
+    check_in = _fmt_date(check_in_raw)
+    check_out = _fmt_date(check_out_raw)
     villa = guest.get("villa", "—") or "—"
     language = guest.get("language", "—") or "—"
 
@@ -72,7 +97,7 @@ def _guest_card(guest: dict) -> str:
       <div class="card-header">
         {photo_html}
         <div>
-          <p class="name">{full_name}</p>
+          <p class="name">{full_name} {'<span class="badge on-property">On Property</span>' if on_property else ''}<span class="confidence {conf_class}">{conf_label}</span></p>
           <p class="meta">
             Check-in: {check_in} &nbsp;|&nbsp; Check-out: {check_out}<br>
             Villa: {villa} &nbsp;|&nbsp; Language: {language}<br>
@@ -80,7 +105,9 @@ def _guest_card(guest: dict) -> str:
           </p>
         </div>
       </div>
+      {f'<p class="confidence-reason">{confidence_reason}</p>' if confidence_reason else ''}
       <p class="summary">{summary}</p>
+      {f'<p class="summary-es">{summary_es}</p>' if summary_es else ''}
       {links_html}
     </div>
     """
@@ -101,13 +128,13 @@ def build_html(guests_with_profiles: list[dict]) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Anticipatory Guest Report</title>
+  <title>Sabueso Anticipatory Guest Report</title>
   <style>{STYLES}</style>
 </head>
 <body>
   <div class="wrapper">
-    <h1>Anticipatory Guest Report</h1>
-    <p class="subtitle">Arrivals in the next 7 days &mdash; generated {today}</p>
+    <h1>Sabueso Anticipatory Guest Report</h1>
+    <p class="subtitle">On property &amp; arriving in the next 7 days &mdash; generated {today}</p>
     {body_html}
     <p class="footer">This report is auto-generated by Sabueso. Do not reply.</p>
   </div>
