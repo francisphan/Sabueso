@@ -39,8 +39,12 @@ Fields:
   Do NOT include people-search aggregators (Spokeo, Whitepages, BeenVerified, etc.).
   Only include a URL if you are confident it is active and belongs to this exact person.
 - "photo_url": a direct image URL (.jpg/.jpeg/.png/.webp) of a headshot for this exact person.
-  Look on their LinkedIn profile page first, then company bio, then news articles.
-  Return null if you are not confident it is the correct person and a directly accessible image.
+  Search broadly: visit bio or team pages on their employer's website, their personal website,
+  Twitter/X profile (pbs.twimg.com images load without authentication), author pages on
+  publications or magazines where their work appears, press releases, and news articles.
+  Extract the direct image src URL from the page HTML — do not guess at URL patterns.
+  Do NOT use LinkedIn or Instagram — their CDN images require authentication and will not load.
+  Return null if you are not confident it is the correct person or the image requires authentication.
 - "confidence": an integer 0–10. Apply these rules strictly:
     0–2: Almost no verifiable public information, or the name is extremely common with no way
          to identify the specific individual.
@@ -66,23 +70,21 @@ If no public information is available, return:
 """
 
 PHOTO_PROMPT = """\
-Find a publicly accessible profile photo or headshot for the person below. Search in this
-priority order — stop as soon as you find a working direct image URL:
+Find a publicly accessible profile photo or headshot for the person below.
 
-1. Twitter/X profile — search for their Twitter/X account, visit the profile page, extract
-   the profile image URL (these are pbs.twimg.com/profile_images/... URLs and are publicly
-   accessible without authentication).
-2. Company or personal website bio page — look for an /about or /team page with a headshot.
-3. News article or press release with a photo of this person.
-4. Any other public web page with a clear headshot.
+Search broadly: visit bio or team pages on their employer's website, their personal website,
+Twitter/X profile (pbs.twimg.com/profile_images/... URLs are publicly accessible without
+authentication), author pages on publications or magazines where their work appears, press
+releases, and news articles. Visit the actual pages and extract the direct image src URL from
+the HTML — do not guess at URL patterns.
 
-Do NOT use LinkedIn or Instagram — their CDN images require authentication and will not load.
+Do NOT use LinkedIn or Instagram — their CDN images require authentication and will not load in
+email clients.
 
 Return ONLY a JSON object with two fields:
 - "photo_url": a direct image URL ending in .jpg, .jpeg, .png, or .webp that does not require
   authentication to load, or null if nothing reliable was found.
-- "source_url": the profile page URL where the photo was found (e.g. the Twitter/X profile URL
-  or company bio page), or null if no photo was found.
+- "source_url": the page URL where the photo was found, or null if no photo was found.
 
 Person: {full_name}
 Home location: {location}
