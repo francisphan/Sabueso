@@ -1,17 +1,19 @@
 import os
 import sys
 from google import genai
+from dotenv import load_dotenv  # <-- 1. Import the library
 
 def main():
-    # 1. Verify the API key is present
+    # 2. Load the environment variables from the .env file
+    load_dotenv() 
+
+    # Verify the API key is present
     if "GEMINI_API_KEY" not in os.environ:
-        print("Error: Please set the GEMINI_API_KEY environment variable.")
+        print("Error: GEMINI_API_KEY not found. Please add it to your .env file.")
         sys.exit(1)
 
-    # 2. Initialize the client
+    # Initialize the client (it automatically finds the key in os.environ)
     client = genai.Client()
-    
-    # We are using the Flash model as it is optimized for fast, conversational text
     model_id = "gemini-2.5-flash" 
 
     print("=========================================")
@@ -20,23 +22,18 @@ def main():
     print("=========================================\n")
 
     try:
-        # 3. Start the chat session (this automatically tracks conversation history)
         chat = client.chats.create(model=model_id)
         
-        # 4. Create the chat loop
         while True:
             user_input = input("You: ")
             
-            # Handle exit commands
             if user_input.strip().lower() in ['quit', 'exit']:
                 print("Goodbye!")
                 break
                 
-            # Ignore empty inputs
             if not user_input.strip():
                 continue
                 
-            # Send the message and print the response
             response = chat.send_message(user_input)
             print(f"\nGemini: {response.text}\n")
             
