@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+from urllib.parse import urljoin, urlparse
 
 import requests
 from google import genai
@@ -151,6 +152,57 @@ async def _validate_links(links: list[str]) -> list[str]:
     return valid
 
 
+def _scrape_photo_from_page(url: str, name_parts: list[str]) -> str | None:
+    """Fetch a page and look for a profile image URL.
+
+    Strategy (in order):
+    1. Any <img src> whose URL contains part of the person's name.
+    2. The og:image or twitter:image meta tag.
+    """
+    try:
+        resp = requests.get(url, timeout=8, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code >= 400:
+            return None
+        text = resp.text[:120_000]
+
+        # 1. img src containing the person's name
+        for img_url in re.findall(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', text, re.IGNORECASE):
+            if (any(p in img_url.lower() for p in name_parts)
+                    and re.search(r'\.(jpe?g|png|webp)(\?|$)', img_url, re.IGNORECASE)):
+                return img_url
+
+        # 2. og:image / twitter:image
+        for pattern in [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](https?://[^"\'?\s]+)',
+            r'<meta[^>]+content=["\'](https?://[^"\'?\s]+)["\'][^>]+property=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\'](https?://[^"\'?\s]+)',
+            r'<meta[^>]+content=["\'](https?://[^"\'?\s]+)["\'][^>]+name=["\']twitter:image["\']',
+        ]:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                og = m.group(1)
+                if re.search(r'\.(jpe?g|png|webp)(\?|$)', og, re.IGNORECASE):
+                    return og
+    except Exception:
+        pass
+    return None
+
+
+async def _scrape_photo_from_links(links: list[str], full_name: str) -> str | None:
+    """Try to scrape a profile photo from the person's known pages."""
+    name_parts = [p.lower() for p in full_name.split() if len(p) > 2]
+    log.info("    Scraping %d known page(s) for a photo…", len(links))
+    results = await asyncio.gather(
+        *[asyncio.to_thread(_scrape_photo_from_page, url, name_parts) for url in links]
+    )
+    for url, photo in zip(links, results):
+        if photo:
+            log.info("    Photo scraped from %s: %s", url, photo)
+            return photo
+    log.info("    No photo found by scraping.")
+    return None
+
+
 async def _find_photo(client: genai.Client, guest: dict, hint_url: str) -> tuple[str | None, str | None]:
     """Search for a publicly accessible profile photo. Returns (photo_url, source_url)."""
     full_name = f"{guest['first_name']} {guest['last_name']}".strip()
@@ -214,7 +266,13 @@ async def _profile_one(client: genai.Client, guest: dict) -> dict:
         log.info("    Primary photo URL is dead, clearing.")
         profile["photo_url"] = None
 
-    # If still no photo, search Twitter/X, company pages, etc.
+    # If still no photo, scrape the known profile pages ourselves
+    if not profile["photo_url"] and profile["links"]:
+        profile["photo_url"] = await _scrape_photo_from_links(profile["links"], full_name)
+        if profile["photo_url"] and not await asyncio.to_thread(_check_link, profile["photo_url"]):
+            profile["photo_url"] = None
+
+    # Last resort: ask Gemini to search for a photo
     if not profile["photo_url"]:
         hint = profile["links"][0] if profile["links"] else ""
         photo_url, source_url = await _find_photo(client, guest, hint)
