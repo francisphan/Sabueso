@@ -10,7 +10,7 @@ SELECT Guest_First_Name__c, Guest_Last_Name__c, Email__c,
        City__c, State_Province__c, Country__c, Language__c
 FROM TVRS_Guest__c
 WHERE (Check_In_Date__c >= TODAY AND Check_In_Date__c <= NEXT_N_DAYS:7)
-   OR (Check_In_Date__c < TODAY AND Check_Out_Date__c >= TODAY)
+   OR (Check_In_Date__c >= LAST_N_DAYS:7 AND Check_In_Date__c < TODAY AND Check_Out_Date__c >= TODAY)
 ORDER BY Check_In_Date__c ASC
 """
 
