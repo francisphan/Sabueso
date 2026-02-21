@@ -39,7 +39,7 @@ def run_report() -> None:
         log.warning("REPORT_SUBSCRIBERS is empty — no email sent.")
         return
 
-    subject = f"Anticipatory Guest Report — {len(profiled)} arriving this week"
+    subject = f"Sabueso Guest Report — {len(profiled)} on property & arriving this week"
     log.info("Sending report to %d subscriber(s)…", len(recipients))
     send_report(subject=subject, html_body=html, recipients=recipients)
     log.info("Done.")

@@ -1,4 +1,4 @@
-"""Query Salesforce for TVRS guests arriving in the next 7 days."""
+"""Query Salesforce for TVRS guests currently on property or arriving in the next 7 days."""
 
 import os
 import requests
@@ -9,8 +9,8 @@ SELECT Guest_First_Name__c, Guest_Last_Name__c, Email__c,
        Check_In_Date__c, Check_Out_Date__c, Villa_number__c,
        City__c, State_Province__c, Country__c, Language__c
 FROM TVRS_Guest__c
-WHERE Check_In_Date__c >= TODAY
-  AND Check_In_Date__c <= NEXT_N_DAYS:7
+WHERE (Check_In_Date__c >= TODAY AND Check_In_Date__c <= NEXT_N_DAYS:7)
+   OR (Check_In_Date__c < TODAY AND Check_Out_Date__c >= TODAY)
 ORDER BY Check_In_Date__c ASC
 """
 
@@ -39,7 +39,7 @@ def _connect() -> Salesforce:
 
 
 def fetch_upcoming_guests() -> list[dict]:
-    """Return a list of guest dicts for arrivals in the next 7 days."""
+    """Return guests currently on property or arriving in the next 7 days."""
     sf = _connect()
     result = sf.query_all(SOQL.strip())
     records = result.get("records", [])
