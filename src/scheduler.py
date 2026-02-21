@@ -26,12 +26,16 @@ def run_report() -> None:
     log.info("Fetching upcoming guests from Salesforce…")
     guests = fetch_upcoming_guests()
     log.info("Found %d upcoming guest(s).", len(guests))
+    for g in guests:
+        log.info("  %s %s | check-in: %s | check-out: %s | villa: %s",
+            g["first_name"], g["last_name"], g["check_in"], g["check_out"], g["villa"] or "—")
 
     log.info("Profiling guests with Gemini…")
     profiled = profile_guests(guests)
 
     log.info("Building HTML report…")
     html = build_html(profiled)
+    log.info("Report built (%d bytes).", len(html))
 
     subscribers_raw = os.environ.get("REPORT_SUBSCRIBERS", "")
     recipients = [s.strip() for s in subscribers_raw.split(",") if s.strip()]
@@ -40,9 +44,9 @@ def run_report() -> None:
         return
 
     subject = f"Sabueso Guest Report - {len(profiled)} guests on property & arriving this week"
-    log.info("Sending report to %d subscriber(s)…", len(recipients))
+    log.info("Sending report to %d subscriber(s): %s", len(recipients), ", ".join(recipients))
     send_report(subject=subject, html_body=html, recipients=recipients)
-    log.info("Done.")
+    log.info("Report sent successfully. Pipeline complete.")
 
 
 def start_scheduler() -> None:

@@ -2,12 +2,15 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 
 import requests
 from google import genai
 from google.genai import types
+
+log = logging.getLogger(__name__)
 
 MODEL_ID = "gemini-2.5-flash"
 
@@ -133,14 +136,24 @@ def _check_link(url: str) -> bool:
 
 async def _validate_links(links: list[str]) -> list[str]:
     """Filter links down to only those that are reachable."""
+    if not links:
+        return []
+    log.info("    Validating %d link(s)…", len(links))
     results = await asyncio.gather(*[asyncio.to_thread(_check_link, url) for url in links])
-    return [url for url, ok in zip(links, results) if ok]
+    valid = [url for url, ok in zip(links, results) if ok]
+    dead = len(links) - len(valid)
+    if dead:
+        log.info("    %d link(s) kept, %d dead link(s) removed.", len(valid), dead)
+    else:
+        log.info("    All %d link(s) are reachable.", len(valid))
+    return valid
 
 
 async def _find_photo(client: genai.Client, guest: dict, hint_url: str) -> tuple[str | None, str | None]:
     """Search for a publicly accessible profile photo. Returns (photo_url, source_url)."""
     full_name = f"{guest['first_name']} {guest['last_name']}".strip()
     location = _location_str(guest)
+    log.info("    Searching for photo via fallback (Twitter/X, company pages, news)…")
     prompt = PHOTO_PROMPT.format(full_name=full_name, location=location, hint_url=hint_url or "none")
     try:
         response = await asyncio.to_thread(
@@ -157,9 +170,12 @@ async def _find_photo(client: genai.Client, guest: dict, hint_url: str) -> tuple
         photo_url = data.get("photo_url") or None
         source_url = data.get("source_url") or None
         if photo_url and await asyncio.to_thread(_check_link, photo_url):
+            log.info("    Fallback photo found: %s", photo_url)
             return photo_url, source_url
+        log.info("    No usable fallback photo found.")
         return None, None
     except Exception:
+        log.warning("    Photo fallback search failed.")
         return None, None
 
 
@@ -169,6 +185,7 @@ async def _profile_one(client: genai.Client, guest: dict) -> dict:
     location = _location_str(guest)
     email = guest.get("email", "")
     email_domain = email.split("@")[-1] if "@" in email else "unknown"
+    log.info("Profiling: %s (%s)…", full_name, location or "location unknown")
     prompt = PROFILE_PROMPT.format(full_name=full_name, location=location, email_domain=email_domain)
 
     response = await asyncio.to_thread(
@@ -181,10 +198,18 @@ async def _profile_one(client: genai.Client, guest: dict) -> dict:
     )
 
     profile = _parse_profile(response.text or "")
+    log.info(
+        "  Profile received — confidence: %d/10 | links: %d | photo: %s",
+        profile["confidence"],
+        len(profile["links"]),
+        "yes" if profile["photo_url"] else "none",
+    )
+
     profile["links"] = await _validate_links(profile["links"])
 
     # Validate photo URL; clear it if dead
     if profile["photo_url"] and not await asyncio.to_thread(_check_link, profile["photo_url"]):
+        log.info("    Primary photo URL is dead, clearing.")
         profile["photo_url"] = None
 
     # If still no photo, search Twitter/X, company pages, etc.
@@ -197,6 +222,10 @@ async def _profile_one(client: genai.Client, guest: dict) -> dict:
             if await asyncio.to_thread(_check_link, source_url):
                 profile["links"].append(source_url)
 
+    log.info("  Done: %s — confidence: %d/10 | links: %d | photo: %s",
+        full_name, profile["confidence"], len(profile["links"]),
+        "found" if profile["photo_url"] else "not found",
+    )
     return {**guest, "profile": profile}
 
 
@@ -206,13 +235,16 @@ async def _profile_all(guests: list[dict]) -> list[dict]:
     # Default is 60/min (1/sec); raise GEMINI_RPM if on a higher quota tier.
     rpm = int(os.environ.get("GEMINI_RPM", "60"))
     delay = 60.0 / rpm  # seconds between request starts
+    log.info("Profiling %d guest(s) with %s at %d RPM (%.1fs stagger)…", len(guests), MODEL_ID, rpm, delay)
 
     async def staggered(i: int, guest: dict) -> dict:
         await asyncio.sleep(i * delay)
         return await _profile_one(client, guest)
 
     tasks = [staggered(i, g) for i, g in enumerate(guests)]
-    return await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks)
+    log.info("All guests profiled.")
+    return results
 
 
 def profile_guests(guests: list[dict]) -> list[dict]:

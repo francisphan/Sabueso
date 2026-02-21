@@ -1,8 +1,11 @@
 """Query Salesforce for TVRS guests currently on property or arriving in the next 7 days."""
 
+import logging
 import os
 import requests
 from simple_salesforce import Salesforce
+
+log = logging.getLogger(__name__)
 
 SOQL = """
 SELECT Guest_First_Name__c, Guest_Last_Name__c, Email__c,
@@ -18,6 +21,7 @@ ORDER BY Check_In_Date__c ASC
 def _get_access_token() -> tuple[str, str]:
     """Exchange the refresh token for a fresh access token. Returns (access_token, instance_url)."""
     instance_url = os.environ["SF_INSTANCE_URL"]
+    log.info("Requesting Salesforce access token from %s…", instance_url)
     resp = requests.post(
         f"{instance_url}/services/oauth2/token",
         data={
@@ -29,35 +33,44 @@ def _get_access_token() -> tuple[str, str]:
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["access_token"], data.get("instance_url", instance_url)
+    resolved_url = data.get("instance_url", instance_url)
+    log.info("Access token obtained. Instance URL: %s", resolved_url)
+    return data["access_token"], resolved_url
 
 
 def _connect() -> Salesforce:
     """Authenticate with Salesforce using OAuth2 connected-app tokens."""
     access_token, instance_url = _get_access_token()
+    log.info("Connected to Salesforce.")
     return Salesforce(session_id=access_token, instance_url=instance_url)
 
 
 def fetch_upcoming_guests() -> list[dict]:
     """Return guests currently on property or arriving in the next 7 days."""
     sf = _connect()
+    log.info("Running SOQL query for on-property and upcoming guests…")
     result = sf.query_all(SOQL.strip())
     records = result.get("records", [])
+    log.info("Query returned %d record(s).", len(records))
 
     guests = []
     for rec in records:
-        guests.append(
-            {
-                "first_name": rec.get("Guest_First_Name__c", ""),
-                "last_name": rec.get("Guest_Last_Name__c", ""),
-                "email": rec.get("Email__c", ""),
-                "check_in": rec.get("Check_In_Date__c", ""),
-                "check_out": rec.get("Check_Out_Date__c", ""),
-                "villa": rec.get("Villa_number__c", ""),
-                "city": rec.get("City__c", ""),
-                "state": rec.get("State_Province__c", ""),
-                "country": rec.get("Country__c", ""),
-                "language": rec.get("Language__c", ""),
-            }
+        guest = {
+            "first_name": rec.get("Guest_First_Name__c", ""),
+            "last_name": rec.get("Guest_Last_Name__c", ""),
+            "email": rec.get("Email__c", ""),
+            "check_in": rec.get("Check_In_Date__c", ""),
+            "check_out": rec.get("Check_Out_Date__c", ""),
+            "villa": rec.get("Villa_number__c", ""),
+            "city": rec.get("City__c", ""),
+            "state": rec.get("State_Province__c", ""),
+            "country": rec.get("Country__c", ""),
+            "language": rec.get("Language__c", ""),
+        }
+        log.debug(
+            "  Guest: %s %s | check-in: %s | check-out: %s | villa: %s",
+            guest["first_name"], guest["last_name"],
+            guest["check_in"], guest["check_out"], guest["villa"] or "—",
         )
+        guests.append(guest)
     return guests
