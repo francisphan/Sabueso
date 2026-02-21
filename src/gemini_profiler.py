@@ -5,23 +5,87 @@ import json
 import os
 import re
 
+import requests
 from google import genai
 from google.genai import types
 
 MODEL_ID = "gemini-2.5-flash"
 
 PROFILE_PROMPT = """\
-Research the following person and return a JSON object with these fields:
-- "summary": a 2–4 sentence bio or description of who this person is
-- "links": a list of relevant URLs (LinkedIn, company page, news articles, etc.)
-- "photo_url": the most likely public photo URL if one can be found, otherwise null
+You are helping staff at The Vines of Mendoza, a luxury private residence and wine hotel in
+Mendoza, Argentina, prepare for arriving guests. Guests are typically affluent international
+travelers interested in wine, food, and high-end tourism.
+
+Research the person below and return a JSON object. Every field must refer to the SAME
+individual. Use the guest's home city/country and email domain (if provided) to pick the most
+likely match when multiple people share the name.
+
+Fields:
+- "summary": a 2–4 sentence bio in English
+- "summary_es": the same bio translated into Spanish
+- "links": URLs for this specific person only. Include all of the following that you can find
+  and confirm belong to this exact person:
+    • LinkedIn profile
+    • Instagram profile
+    • Twitter/X profile
+    • Facebook profile
+    • Any other social media (YouTube, TikTok, Threads, etc.)
+    • Official company/personal website or bio page
+    • Major news or publication articles
+  Do NOT mix links from different people with the same name.
+  Do NOT include people-search aggregators (Spokeo, Whitepages, BeenVerified, etc.).
+  Only include a URL if you are confident it is active and belongs to this exact person.
+- "photo_url": a direct image URL (.jpg/.jpeg/.png/.webp) of a headshot for this exact person.
+  Look on their LinkedIn profile page first, then company bio, then news articles.
+  Return null if you are not confident it is the correct person and a directly accessible image.
+- "confidence": an integer 0–10. Apply these rules strictly:
+    0–2: Almost no verifiable public information, or the name is extremely common with no way
+         to identify the specific individual.
+    3–4: Common name with several people sharing it; selected best guess based on location but
+         uncertain. Or very little public info found.
+    5–6: Moderate confidence — one plausible match found that fits the location/context, but
+         other people with this name exist and could not be fully ruled out.
+    7–8: Good confidence — strong match, limited name ambiguity, profile fits the context of
+         a guest at a luxury wine destination.
+    9–10: Very high confidence — clear public figure or unique name with unambiguous, well-sourced
+          information. Use 10 only for globally recognized individuals.
+  When in doubt, score LOWER. It is better to flag uncertainty than to present wrong information
+  as fact. A name like "Bryan Driscoll" from the USA with many LinkedIn results should score ≤ 4.
+- "confidence_reason": one concise sentence explaining the score
 
 Person: {full_name}
-Location: {location}
+Home location: {location}
+Email domain: {email_domain}
 
 Return ONLY the JSON object, no markdown fences or extra text.
 If no public information is available, return:
-{{"summary": "No public information found.", "links": [], "photo_url": null}}
+{{"summary": "No public information found.", "summary_es": "No se encontró información pública.", "links": [], "photo_url": null, "confidence": 0, "confidence_reason": "No public information found."}}
+"""
+
+PHOTO_PROMPT = """\
+Find a publicly accessible profile photo or headshot for the person below. Search in this
+priority order — stop as soon as you find a working direct image URL:
+
+1. Twitter/X profile — search for their Twitter/X account, visit the profile page, extract
+   the profile image URL (these are pbs.twimg.com/profile_images/... URLs and are publicly
+   accessible without authentication).
+2. Company or personal website bio page — look for an /about or /team page with a headshot.
+3. News article or press release with a photo of this person.
+4. Any other public web page with a clear headshot.
+
+Do NOT use LinkedIn or Instagram — their CDN images require authentication and will not load.
+
+Return ONLY a JSON object with two fields:
+- "photo_url": a direct image URL ending in .jpg, .jpeg, .png, or .webp that does not require
+  authentication to load, or null if nothing reliable was found.
+- "source_url": the profile page URL where the photo was found (e.g. the Twitter/X profile URL
+  or company bio page), or null if no photo was found.
+
+Person: {full_name}
+Home location: {location}
+Additional hint: {hint_url}
+
+Return ONLY the JSON object, no markdown fences or extra text.
 """
 
 
@@ -45,16 +109,67 @@ def _parse_profile(text: str) -> dict:
         data = {"summary": "Could not parse profile.", "links": [], "photo_url": None}
     return {
         "summary": data.get("summary", ""),
+        "summary_es": data.get("summary_es", ""),
         "links": data.get("links", []),
         "photo_url": data.get("photo_url"),
+        "confidence": int(data.get("confidence", 0)),
+        "confidence_reason": data.get("confidence_reason", ""),
     }
+
+
+def _check_link(url: str) -> bool:
+    """Return True if the URL responds with a success status."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.head(url, timeout=5, allow_redirects=True, headers=headers)
+        if resp.status_code < 400:
+            return True
+        # Some servers (especially image CDNs) reject HEAD — fall back to GET
+        resp = requests.get(url, timeout=5, allow_redirects=True, headers=headers, stream=True)
+        return resp.status_code < 400
+    except Exception:
+        return False
+
+
+async def _validate_links(links: list[str]) -> list[str]:
+    """Filter links down to only those that are reachable."""
+    results = await asyncio.gather(*[asyncio.to_thread(_check_link, url) for url in links])
+    return [url for url, ok in zip(links, results) if ok]
+
+
+async def _find_photo(client: genai.Client, guest: dict, hint_url: str) -> tuple[str | None, str | None]:
+    """Search for a publicly accessible profile photo. Returns (photo_url, source_url)."""
+    full_name = f"{guest['first_name']} {guest['last_name']}".strip()
+    location = _location_str(guest)
+    prompt = PHOTO_PROMPT.format(full_name=full_name, location=location, hint_url=hint_url or "none")
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL_ID,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+            ),
+        )
+        text = re.sub(r"^```(?:json)?\s*", "", (response.text or "").strip(), flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text.strip())
+        data = json.loads(text)
+        photo_url = data.get("photo_url") or None
+        source_url = data.get("source_url") or None
+        if photo_url and await asyncio.to_thread(_check_link, photo_url):
+            return photo_url, source_url
+        return None, None
+    except Exception:
+        return None, None
 
 
 async def _profile_one(client: genai.Client, guest: dict) -> dict:
     """Profile a single guest asynchronously."""
     full_name = f"{guest['first_name']} {guest['last_name']}".strip()
     location = _location_str(guest)
-    prompt = PROFILE_PROMPT.format(full_name=full_name, location=location)
+    email = guest.get("email", "")
+    email_domain = email.split("@")[-1] if "@" in email else "unknown"
+    prompt = PROFILE_PROMPT.format(full_name=full_name, location=location, email_domain=email_domain)
 
     response = await asyncio.to_thread(
         client.models.generate_content,
@@ -66,6 +181,22 @@ async def _profile_one(client: genai.Client, guest: dict) -> dict:
     )
 
     profile = _parse_profile(response.text or "")
+    profile["links"] = await _validate_links(profile["links"])
+
+    # Validate photo URL; clear it if dead
+    if profile["photo_url"] and not await asyncio.to_thread(_check_link, profile["photo_url"]):
+        profile["photo_url"] = None
+
+    # If still no photo, search Twitter/X, company pages, etc.
+    if not profile["photo_url"]:
+        hint = profile["links"][0] if profile["links"] else ""
+        photo_url, source_url = await _find_photo(client, guest, hint)
+        profile["photo_url"] = photo_url
+        # Add the source page to links if it's new
+        if source_url and source_url not in profile["links"]:
+            if await asyncio.to_thread(_check_link, source_url):
+                profile["links"].append(source_url)
+
     return {**guest, "profile": profile}
 
 
