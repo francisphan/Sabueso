@@ -70,13 +70,14 @@ def main():
         f"?response_type=code"
         f"&client_id={urllib.parse.quote(CLIENT_ID)}"
         f"&redirect_uri={urllib.parse.quote(REDIRECT_URI)}"
-        f"&scope=api+offline_access"
+        f"&scope=full+offline_access"
     )
 
     server = HTTPServer(("localhost", PORT), CallbackHandler)
 
     print(f"Opening browser for Salesforce authorization…")
     print(f"If the browser doesn't open, visit:\n  {auth_url}\n")
+    print(f"\nAuth URL:\n{auth_url}\n")
     webbrowser.open(auth_url)
 
     # Serve one request then stop

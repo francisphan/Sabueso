@@ -71,7 +71,16 @@ async def _profile_one(client: genai.Client, guest: dict) -> dict:
 
 async def _profile_all(guests: list[dict]) -> list[dict]:
     client = _build_client()
-    tasks = [_profile_one(client, g) for g in guests]
+    # Stagger requests to stay within the API rate limit.
+    # Default is conservative (4/min) for the free tier; set GEMINI_RPM higher for paid tier.
+    rpm = int(os.environ.get("GEMINI_RPM", "4"))
+    delay = 60.0 / rpm  # seconds between request starts
+
+    async def staggered(i: int, guest: dict) -> dict:
+        await asyncio.sleep(i * delay)
+        return await _profile_one(client, guest)
+
+    tasks = [staggered(i, g) for i, g in enumerate(guests)]
     return await asyncio.gather(*tasks)
 
 

@@ -1,6 +1,7 @@
 """Query Salesforce for TVRS guests arriving in the next 7 days."""
 
 import os
+import requests
 from simple_salesforce import Salesforce
 
 SOQL = """
@@ -14,15 +15,27 @@ ORDER BY Check_In_Date__c ASC
 """
 
 
+def _get_access_token() -> tuple[str, str]:
+    """Exchange the refresh token for a fresh access token. Returns (access_token, instance_url)."""
+    instance_url = os.environ["SF_INSTANCE_URL"]
+    resp = requests.post(
+        f"{instance_url}/services/oauth2/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": os.environ["SF_CLIENT_ID"],
+            "client_secret": os.environ["SF_CLIENT_SECRET"],
+            "refresh_token": os.environ["SF_REFRESH_TOKEN"],
+        },
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data["access_token"], data.get("instance_url", instance_url)
+
+
 def _connect() -> Salesforce:
     """Authenticate with Salesforce using OAuth2 connected-app tokens."""
-    return Salesforce(
-        instance_url=os.environ["SF_INSTANCE_URL"],
-        client_id=os.environ["SF_CLIENT_ID"],
-        client_secret=os.environ["SF_CLIENT_SECRET"],
-        refresh_token=os.environ["SF_REFRESH_TOKEN"],
-        domain="login",  # use 'test' for sandboxes
-    )
+    access_token, instance_url = _get_access_token()
+    return Salesforce(session_id=access_token, instance_url=instance_url)
 
 
 def fetch_upcoming_guests() -> list[dict]:
