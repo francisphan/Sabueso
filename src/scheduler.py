@@ -9,15 +9,26 @@ from pathlib import Path
 import schedule
 
 from salesforce_client import fetch_upcoming_guests
-from gemini_profiler import profile_guests
+from gemini_profiler import current_guest, profile_guests
 from report_builder import build_html
 from email_sender import send_report
 
+
+class _GuestTagFilter(logging.Filter):
+    """Inject the current guest name (from contextvars) into every log record."""
+    def filter(self, record):
+        guest = current_guest.get("")
+        record.guest_tag = f"[{guest}] " if guest else ""
+        return True
+
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] %(guest_tag)s%(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+for _h in logging.root.handlers:
+    _h.addFilter(_GuestTagFilter())
 log = logging.getLogger(__name__)
 
 

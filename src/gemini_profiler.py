@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextvars
 import json
 import logging
 import os
@@ -14,6 +15,10 @@ from google import genai
 from google.genai import types
 
 log = logging.getLogger(__name__)
+
+# Contextvar holds the current guest name for log tagging during concurrent profiling.
+# Read by _GuestTagFilter (installed in scheduler.py) to prefix log lines.
+current_guest: contextvars.ContextVar[str] = contextvars.ContextVar("current_guest", default="")
 
 GEMINI_MODEL = "gemini-2.5-flash"   # web research & photo search
 CLAUDE_MODEL = "claude-sonnet-4-6"  # vision checks & consistency selection
@@ -773,6 +778,7 @@ async def _profile_one(
 ) -> dict:
     """Profile a single guest asynchronously."""
     full_name = f"{guest['first_name']} {guest['last_name']}".strip()
+    current_guest.set(full_name)
     location = _location_str(guest)
     email = guest.get("email", "")
     email_domain = email.split("@")[-1] if "@" in email else "unknown"
