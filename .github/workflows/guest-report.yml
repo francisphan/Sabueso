@@ -2,8 +2,8 @@ name: Guest Report
 
 on:
   schedule:
-    - cron: "0 13 * * 1"   # Monday    08:00 ART (UTC-3) = 13:00 UTC
-    - cron: "0 13 * * 4"   # Thursday  08:00 ART (UTC-3) = 13:00 UTC
+    - cron: "0 8 * * 1"   # Monday    05:00 ART (UTC-3) = 08:00 UTC
+    - cron: "0 8 * * 4"   # Thursday  05:00 ART (UTC-3) = 08:00 UTC
   workflow_dispatch:        # Allow manual trigger from GitHub UI
 
 jobs:
@@ -26,6 +26,7 @@ jobs:
       - name: Run report
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SF_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
           SF_CLIENT_SECRET: ${{ secrets.SF_CLIENT_SECRET }}
           SF_REFRESH_TOKEN: ${{ secrets.SF_REFRESH_TOKEN }}

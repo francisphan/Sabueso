@@ -1,4 +1,5 @@
 python-dotenv
+anthropic
 google-genai
 google-auth
 google-auth-oauthlib
