@@ -587,12 +587,14 @@ async def _check_is_headshot(
     sem: asyncio.Semaphore,
     img_url: str,
     full_name: str = "",
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, str | None]:
     """Download img_url and ask Claude Vision whether it is a headshot of a single person.
 
-    Returns (is_headshot, description) where description is a one-sentence physical
-    description used for cross-referencing across candidates.
-    Returns (False, None) on any download or API error.
+    Returns (is_headshot, description, face_position) where:
+    - description is a one-sentence physical description for cross-referencing
+    - face_position is a CSS object-position value (e.g. "50% 25%") locating the face
+      center so the circular crop can be centred on it
+    Returns (False, None, None) on any download or API error.
     """
     try:
         resp = await asyncio.to_thread(
@@ -601,7 +603,7 @@ async def _check_is_headshot(
         )
         if resp.status_code >= 400:
             log.info("  Vision skip (HTTP %d — not downloaded): %s", resp.status_code, img_url)
-            return False, None
+            return False, None, None
 
         image_bytes = resp.content
         url_lower = img_url.lower().split("?")[0]
@@ -637,10 +639,14 @@ async def _check_is_headshot(
                             f"person's face is visible and identifiable. Answer no only for group "
                             f"photos, landscapes, logos, illustrations, or photos where no face is "
                             f"clearly discernible.{name_context}\n"
-                            f"Answer on exactly two lines:\n"
+                            f"Answer on exactly three lines:\n"
                             f"HEADSHOT: yes or no\n"
                             f"DESCRIPTION: if yes, one sentence describing approximate age, hair color/"
-                            f"style, and any distinctive features; if no, write N/A"
+                            f"style, and any distinctive features; if no, write N/A\n"
+                            f"FACE_POSITION: if yes, estimate the face center as CSS object-position "
+                            f"values 'X% Y%' where 0% 0% is top-left and 100% 100% is bottom-right "
+                            f"(e.g. '50% 25%' for face in upper-center of a landscape photo, "
+                            f"'50% 50%' for a centered portrait); if no, write N/A"
                         ),
                     },
                 ]}],
@@ -655,31 +661,36 @@ async def _check_is_headshot(
         description = parsed.get("DESCRIPTION") if is_headshot else None
         if description and description.upper() in ("N/A", "NA", ""):
             description = None
-        return is_headshot, description
+        face_position = None
+        if is_headshot:
+            raw_pos = parsed.get("FACE_POSITION", "")
+            m = re.search(r'(\d{1,3}%\s+\d{1,3}%)', raw_pos)
+            face_position = m.group(1) if m else "50% 25%"
+        return is_headshot, description, face_position
     except Exception as exc:
         log.debug("  Vision check failed for %s: %s", img_url, exc)
-        return False, None
+        return False, None, None
 
 
 async def _select_by_consistency(
     client: anthropic.AsyncAnthropic,
     sem: asyncio.Semaphore,
-    confirmed: list[tuple[int, str, str | None]],
+    confirmed: list[tuple[int, str, str | None, str | None]],
     full_name: str,
-) -> str:
+) -> tuple[str, str | None]:
     """Given multiple confirmed headshots, pick the one most likely to be the correct person.
 
     Sends Claude all physical descriptions and asks which form a consistent group
-    (i.e. appear to be the same individual). Returns the URL of the highest-scored
-    consistent candidate (confirmed is expected sorted by score descending).
+    (i.e. appear to be the same individual). Returns (url, face_position) of the
+    highest-scored consistent candidate (confirmed is expected sorted by score descending).
     Falls back to the top candidate on any error.
     """
     if len(confirmed) == 1:
-        return confirmed[0][1]
+        return confirmed[0][1], confirmed[0][3]
 
     entries = "\n".join(
         f"{i + 1}. {desc or 'No description available'}"
-        for i, (_, _, desc) in enumerate(confirmed)
+        for i, (_, _, desc, _fp) in enumerate(confirmed)
     )
     prompt = (
         f"Below are physical descriptions of people shown in {len(confirmed)} different "
@@ -710,10 +721,10 @@ async def _select_by_consistency(
             "  Consistency check: photos %s are consistent; selecting #%d (score %d): %s",
             [i + 1 for i in indices], best_idx + 1, confirmed[best_idx][0], confirmed[best_idx][1],
         )
-        return confirmed[best_idx][1]
+        return confirmed[best_idx][1], confirmed[best_idx][3]
     except Exception as exc:
         log.warning("  Consistency selection failed (%s), falling back to top candidate.", exc)
-        return confirmed[0][1]
+        return confirmed[0][1], confirmed[0][3]
 
 
 async def _find_photo(
@@ -937,30 +948,32 @@ async def _profile_one(
         log.info("  Top photo candidates: %s", [(s, u) for s, u in candidate_pool[:3]])
 
     profile["photo_url"] = None
+    profile["photo_face_position"] = None
     if candidate_pool:
         top = candidate_pool[:5]
         log.info("  Vision-checking top %d candidate(s)…", len(top))
         checks = await asyncio.gather(
             *[_check_is_headshot(claude, sem, url, full_name) for _, url in top]
         )
-        # checks is list of (bool, str | None) — is_headshot, description
-        confirmed: list[tuple[int, str, str | None]] = [
-            (s, u, desc)
-            for (s, u), (passed, desc) in zip(top, checks)
+        # checks is list of (bool, str | None, str | None) — is_headshot, description, face_position
+        confirmed: list[tuple[int, str, str | None, str | None]] = [
+            (s, u, desc, face_pos)
+            for (s, u), (passed, desc, face_pos) in zip(top, checks)
             if passed
         ]
-        for (s, u), (passed, desc) in zip(top, checks):
+        for (s, u), (passed, desc, _fp) in zip(top, checks):
             status = "confirmed" if passed else "rejected"
             log.info("  Vision %s (score %d): %s", status, s, u)
 
         if confirmed:
             if len(confirmed) == 1:
-                best_url = confirmed[0][1]
+                best_url, best_face_pos = confirmed[0][1], confirmed[0][3]
                 log.info("  1 confirmed headshot (score %d): %s", confirmed[0][0], best_url)
             else:
                 log.info("  %d confirmed headshots; running consistency check…", len(confirmed))
-                best_url = await _select_by_consistency(claude, sem, confirmed, full_name)
+                best_url, best_face_pos = await _select_by_consistency(claude, sem, confirmed, full_name)
             profile["photo_url"] = best_url
+            profile["photo_face_position"] = best_face_pos
         else:
             log.info("  No candidates passed vision check.")
 

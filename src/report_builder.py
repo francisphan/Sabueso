@@ -98,6 +98,7 @@ def _guest_card(guest: dict) -> str:
     profile = guest.get("profile", {})
     full_name = f"{guest.get('first_name', '')} {guest.get('last_name', '')}".strip() or "Unknown Guest"
     photo_url = profile.get("photo_url")
+    photo_face_position = profile.get("photo_face_position") or "50% 25%"
     summary = profile.get("summary", "")
     summary_es = profile.get("summary_es", "")
     links = profile.get("links", [])
@@ -125,7 +126,7 @@ def _guest_card(guest: dict) -> str:
     language = guest.get("language", "—") or "—"
 
     if photo_url:
-        photo_html = f'<img src="{photo_url}" alt="{full_name}" class="photo">'
+        photo_html = f'<img src="{photo_url}" alt="{full_name}" class="photo" style="object-position: {photo_face_position}">'
     else:
         photo_html = '<div class="photo-placeholder">👤</div>'
 
