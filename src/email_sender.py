@@ -2,6 +2,7 @@
 
 import base64
 import os
+import socket
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
@@ -68,6 +69,9 @@ def _save_token(creds: Credentials):
     TOKEN_CACHE.write_text(creds.to_json())
 
 
+_GMAIL_TIMEOUT = int(os.environ.get("GMAIL_TIMEOUT", "60"))
+
+
 def send_report(
     subject: str,
     html_body: str,
@@ -76,8 +80,6 @@ def send_report(
 ) -> None:
     """Send an HTML email to all recipients via Gmail API."""
     sender = os.environ.get("GMAIL_SENDER", "me")
-    creds = _get_credentials()
-    service = build("gmail", "v1", credentials=creds)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -92,9 +94,18 @@ def send_report(
 
     all_recipients = recipients + (cc or [])
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    service.users().messages().send(
-        userId="me",
-        body={"raw": raw},
-    ).execute()
+
+    # Set a socket-level timeout so stalled OAuth/Gmail HTTP calls don't hang forever.
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(_GMAIL_TIMEOUT)
+    try:
+        creds = _get_credentials()
+        service = build("gmail", "v1", credentials=creds)
+        service.users().messages().send(
+            userId="me",
+            body={"raw": raw},
+        ).execute()
+    finally:
+        socket.setdefaulttimeout(old_timeout)
 
     print(f"Report sent to {len(all_recipients)} recipient(s).")
