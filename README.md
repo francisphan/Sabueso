@@ -4,12 +4,13 @@
 
 > **Sabueso** (Spanish) — *bloodhound*. A dog bred to track scents across long distances, renowned for its relentless nose and ability to follow a trail no matter how cold. Here, Sabueso hunts down public information about arriving guests so staff at The Vines of Mendoza can greet every visitor with a personal touch.
 
-Sabueso automatically generates a guest intelligence briefing for [The Vines of Mendoza](https://www.vinesofmendoza.com/). Every Monday and Thursday at 08:00 ART it:
+Sabueso automatically generates a guest intelligence briefing for [The Vines of Mendoza](https://www.vinesofmendoza.com/). Every Monday and Thursday at 08:00 UTC it:
 
-1. Queries Salesforce for guests **currently on property** (checked in within the last 7 days) and **arriving in the next 7 days**
+1. Queries Salesforce for guests **currently on property** and **arriving in the next 7 days**
 2. Researches each guest using **Gemini 2.5 Flash** with Google Search grounding
-3. Builds an **HTML email** with per-guest profile cards (bio, Spanish translation, social links, photo, confidence score)
-4. Sends the report to a configurable subscriber list via Gmail
+3. Finds the best publicly available headshot using **Claude Sonnet** vision checks
+4. Builds an **HTML email** with per-guest profile cards (bio, Spanish translation, social links, photo, confidence score)
+5. Sends the report to a configurable subscriber list via Gmail
 
 ---
 
@@ -19,7 +20,7 @@ Sabueso automatically generates a guest intelligence briefing for [The Vines of 
 src/
   main.py               CLI entry point
   salesforce_client.py  Salesforce OAuth2 + SOQL query
-  gemini_profiler.py    Gemini research with Google Search grounding
+  gemini_profiler.py    Gemini research + Claude vision photo pipeline
   report_builder.py     HTML email renderer
   email_sender.py       Gmail API sender
   scheduler.py          Pipeline orchestration (fetch → profile → build → send)
@@ -27,7 +28,7 @@ scripts/
   get_salesforce_token.py   One-time OAuth flow to get SF_REFRESH_TOKEN
   get_gmail_token.py        One-time OAuth flow to get GMAIL_REFRESH_TOKEN
 .github/workflows/
-  guest-report.yml      GitHub Actions cron (Mon/Thu 13:00 UTC = 08:00 ART)
+  guest-report.yml      GitHub Actions cron (Mon/Thu 08:00 UTC)
 ```
 
 ---
@@ -42,7 +43,7 @@ Salesforce SOQL
 fetch_upcoming_guests()   → list of guest dicts
       ↓
 profile_guests()          → Gemini researches each guest concurrently
-      ↓
+      ↓                     Claude vision-checks candidate photos
 build_html()              → HTML email with one card per guest
       ↓
 send_report()             → Gmail API sends to REPORT_SUBSCRIBERS
@@ -56,22 +57,32 @@ Fetches from `TVRS_Guest__c` using an OAuth2 refresh-token flow (no username/pas
 
 ### Gemini Profiling (`gemini_profiler.py`)
 
-Each guest gets two Gemini calls (with Google Search grounding):
-1. **Profile call** — returns English bio, Spanish bio, all social/professional links, a confidence score (0–10), and a photo URL
-2. **Photo fallback call** — if the first call yields no usable photo, searches Twitter/X, company pages, and news articles for a publicly accessible headshot
+Each guest goes through two phases:
 
-All returned links and photos are validated (HTTP HEAD with GET fallback) before inclusion. Requests are staggered according to `GEMINI_RPM` (default: 60) to respect API rate limits.
+**Phase 1 — Research (Gemini 2.5 Flash + Google Search grounding)**
+- Returns English bio, Spanish bio, all social/professional links, a confidence score (0–10)
+- Grounding metadata URLs (pages Gemini actually visited) are resolved and merged into links
+- Retries up to 5 times on JSON parse failure; backs off exponentially
+
+**Phase 2 — Photo selection**
+1. **Scrape candidates** from all known links + email-domain bio pages (e.g. `/team`, `/about`, `/team-member/first-last`). Follows discovered internal bio/team links one level deep.
+2. **Score** each candidate image using URL signals, page context, og:image tags, JSON-LD Person schema, alt/title attributes, name proximity in HTML, and penalties for banners/landscapes/article slugs.
+3. **Vision-check top 5** via Claude Sonnet — downloads the image and confirms it is a headshot of a single person.
+4. **Consistency check** — if multiple candidates pass, Claude compares their physical descriptions and selects the self-consistent group, returning the highest-scored matching photo.
+5. **Fallback** — if no candidate passes, a dedicated Gemini search looks for a photo on Twitter/X or news sites.
+
+> **Photo disclaimer:** Photos are sourced automatically and may not always be accurate. LinkedIn and Instagram photos cannot be retrieved without authentication. If a photo looks wrong, search the guest's name directly.
 
 ### Report Card Fields
 
 Each guest card shows:
 - Circular headshot (96px) or placeholder avatar
-- Full name with **On Property** badge (if currently staying) and color-coded **Confidence** badge (green ≥ 8, yellow ≥ 5, red < 5)
+- Full name with **On Property** badge and color-coded **Confidence** badge (green ≥ 8, yellow ≥ 5, red < 5)
 - Check-in / check-out / villa / language / home location
 - Confidence reasoning note
 - English bio (2–4 sentences)
 - Spanish bio
-- Validated social and professional links
+- Validated links (social profiles, company bios, news articles)
 
 ---
 
@@ -93,7 +104,8 @@ cp .env.example .env
 
 | Variable | Description |
 |---|---|
-| `GEMINI_API_KEY` | Google AI Studio API key (billing required for Gemini 2.5 Flash) |
+| `GEMINI_API_KEY` | Google AI Studio API key (Gemini 2.5 Flash) |
+| `ANTHROPIC_API_KEY` | Anthropic API key (Claude Sonnet — vision checks) |
 | `SF_CLIENT_ID` | Salesforce Connected App consumer key |
 | `SF_CLIENT_SECRET` | Salesforce Connected App consumer secret |
 | `SF_REFRESH_TOKEN` | Salesforce OAuth2 refresh token |
@@ -103,7 +115,16 @@ cp .env.example .env
 | `GMAIL_REFRESH_TOKEN` | Gmail OAuth2 refresh token |
 | `GMAIL_SENDER` | Gmail address to send from |
 | `REPORT_SUBSCRIBERS` | Comma-separated recipient email addresses |
-| `GEMINI_RPM` | *(optional)* Gemini requests per minute, default `60` |
+
+**Optional tuning:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `GEMINI_RPM` | `60` | Gemini requests per minute (stagger between guests) |
+| `GEMINI_TIMEOUT` | `180` | Seconds before a Gemini call is cancelled |
+| `GMAIL_TIMEOUT` | `60` | Seconds before Gmail API calls time out |
+| `LLM_MAX_CONCURRENT` | `3` | Max simultaneous Claude vision calls |
+| `SCRAPE_MAX_CONCURRENT` | `15` | Max simultaneous page fetches |
 
 ### 3. Get OAuth tokens
 
@@ -123,9 +144,19 @@ Opens a browser for the Google OAuth flow. Requires a Google Cloud OAuth2 client
 
 ## Running Locally
 
-Run the report immediately (for testing):
+Run the report immediately:
 ```bash
 python src/main.py --now
+```
+
+Override recipients for testing:
+```bash
+python src/main.py --now --to you@example.com
+```
+
+Run multiple times against the same Salesforce data (cached after first fetch):
+```bash
+python src/main.py --now --runs 3 --to you@example.com
 ```
 
 Start the Monday/Thursday scheduler (blocks indefinitely):
@@ -141,17 +172,16 @@ The workflow in `.github/workflows/guest-report.yml` runs `python src/main.py --
 
 | Day | Cron (UTC) | Local time (ART, UTC-3) |
 |---|---|---|
-| Monday | `0 13 * * 1` | 08:00 |
-| Thursday | `0 13 * * 4` | 08:00 |
+| Monday | `0 8 * * 1` | 05:00 |
+| Thursday | `0 8 * * 4` | 05:00 |
 
 It can also be triggered manually from the **Actions** tab via `workflow_dispatch`.
 
 ### Required GitHub Secrets
 
-Set all `.env` variables as repository secrets:
-
 ```bash
 gh secret set GEMINI_API_KEY
+gh secret set ANTHROPIC_API_KEY
 gh secret set SF_CLIENT_ID
 gh secret set SF_CLIENT_SECRET
 gh secret set SF_REFRESH_TOKEN
