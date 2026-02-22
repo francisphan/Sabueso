@@ -125,8 +125,19 @@ def _guest_card(guest: dict) -> str:
     villa = guest.get("villa", "—") or "—"
     language = guest.get("language", "—") or "—"
 
+    photo_source_url = profile.get("photo_source_url")
     if photo_url:
-        photo_html = f'<img src="{photo_url}" alt="{full_name}" class="photo" style="object-position: {photo_face_position}">'
+        photo_img = f'<img src="{photo_url}" alt="{full_name}" class="photo" style="object-position: {photo_face_position}">'
+        if photo_source_url and photo_source_url != "gemini":
+            source_label = _platform_label(photo_source_url)
+            photo_html = (
+                f'<div style="flex-shrink:0; text-align:center;">'
+                f'{photo_img}'
+                f'<div style="margin-top:2px;"><a href="{photo_source_url}" style="font-size:10px; color:#999; text-decoration:none;">via {source_label}</a></div>'
+                f'</div>'
+            )
+        else:
+            photo_html = photo_img
     else:
         photo_html = '<div class="photo-placeholder">👤</div>'
 

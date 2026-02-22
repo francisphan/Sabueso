@@ -390,14 +390,14 @@ def _extract_social_card_photo(url: str) -> str | None:
 
 def _scrape_photo_candidates_from_page(
     url: str, name_parts: list[str]
-) -> tuple[list[tuple[int, str]], list[str]]:
+) -> tuple[list[tuple[int, str, str]], list[str]]:
     """Fetch a page and return (image_candidates, discovered_bio_links).
 
-    image_candidates: list of (score, img_url) tuples
+    image_candidates: list of (score, img_url, source_url) tuples
     discovered_bio_links: internal links that look like bio/team subpages,
                           suitable for a second-pass scrape
     """
-    candidates: list[tuple[int, str]] = []
+    candidates: list[tuple[int, str, str]] = []
     bio_links: list[str] = []
     try:
         resp = requests.get(url, timeout=(4, 8), allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
@@ -424,7 +424,7 @@ def _scrape_photo_candidates_from_page(
             if re.search(r'\.(jpe?g|png|webp)(\?|$)', img_url, re.IGNORECASE):
                 score = _score_photo_candidate(img_url, name_parts, is_meta_tag=False, source_page_url=effective_url)
                 score += 7
-                candidates.append((score, img_url))
+                candidates.append((score, img_url, effective_url))
 
         # Extract full <img> tags so we can check alt/title and surrounding HTML context
         for img_tag in re.finditer(r'<img[^>]+>', text, re.IGNORECASE):
@@ -453,7 +453,7 @@ def _scrape_photo_candidates_from_page(
             elif any(p in context for p in name_parts):
                 score += 2  # at least one name part nearby
 
-            candidates.append((score, img_url))
+            candidates.append((score, img_url, effective_url))
 
         # og:image / twitter:image meta tags
         # Note: [^"\'>\s]+ allows query parameters (e.g. ?w=600&h=600) in the URL.
@@ -478,7 +478,7 @@ def _scrape_photo_candidates_from_page(
                 if re.search(r'\.(jpe?g|png|webp)', img_url, re.IGNORECASE):
                     score = _score_photo_candidate(img_url, name_parts, is_meta_tag=True, source_page_url=effective_url)
                     score += page_bonus
-                    candidates.append((score, img_url))
+                    candidates.append((score, img_url, effective_url))
 
     except Exception:
         pass
@@ -487,7 +487,7 @@ def _scrape_photo_candidates_from_page(
 
 async def _scrape_photo_candidates_from_links(
     links: list[str], full_name: str, scrape_sem: asyncio.Semaphore
-) -> list[tuple[int, str]]:
+) -> list[tuple[int, str, str]]:
     """Scrape all known profile pages and return the full scored candidate list.
 
     scrape_sem caps total concurrent HTTP page fetches across all guests to
@@ -496,7 +496,7 @@ async def _scrape_photo_candidates_from_links(
     """
     name_parts = [p.lower() for p in full_name.split() if len(p) > 2]
 
-    async def fetch(url: str) -> tuple[list[tuple[int, str]], list[str]]:
+    async def fetch(url: str) -> tuple[list[tuple[int, str, str]], list[str]]:
         async with scrape_sem:
             return await asyncio.to_thread(_scrape_photo_candidates_from_page, url, name_parts)
 
@@ -675,22 +675,22 @@ async def _check_is_headshot(
 async def _select_by_consistency(
     client: anthropic.AsyncAnthropic,
     sem: asyncio.Semaphore,
-    confirmed: list[tuple[int, str, str | None, str | None]],
+    confirmed: list[tuple[int, str, str, str | None, str | None]],
     full_name: str,
-) -> tuple[str, str | None]:
+) -> tuple[str, str, str | None]:
     """Given multiple confirmed headshots, pick the one most likely to be the correct person.
 
     Sends Claude all physical descriptions and asks which form a consistent group
-    (i.e. appear to be the same individual). Returns (url, face_position) of the
+    (i.e. appear to be the same individual). Returns (url, source_url, face_position) of the
     highest-scored consistent candidate (confirmed is expected sorted by score descending).
     Falls back to the top candidate on any error.
     """
     if len(confirmed) == 1:
-        return confirmed[0][1], confirmed[0][3]
+        return confirmed[0][1], confirmed[0][2], confirmed[0][4]
 
     entries = "\n".join(
         f"{i + 1}. {desc or 'No description available'}"
-        for i, (_, _, desc, _fp) in enumerate(confirmed)
+        for i, (_, _, _src, desc, _fp) in enumerate(confirmed)
     )
     prompt = (
         f"Below are physical descriptions of people shown in {len(confirmed)} different "
@@ -721,10 +721,10 @@ async def _select_by_consistency(
             "  Consistency check: photos %s are consistent; selecting #%d (score %d): %s",
             [i + 1 for i in indices], best_idx + 1, confirmed[best_idx][0], confirmed[best_idx][1],
         )
-        return confirmed[best_idx][1], confirmed[best_idx][3]
+        return confirmed[best_idx][1], confirmed[best_idx][2], confirmed[best_idx][4]
     except Exception as exc:
         log.warning("  Consistency selection failed (%s), falling back to top candidate.", exc)
-        return confirmed[0][1], confirmed[0][3]
+        return confirmed[0][1], confirmed[0][2], confirmed[0][4]
 
 
 async def _find_photo(
@@ -842,7 +842,7 @@ async def _profile_one(
             return {**guest, "profile": {
                 "summary": "Profile lookup failed due to an API error.",
                 "summary_es": "La búsqueda de perfil falló por un error de API.",
-                "links": [], "photo_url": None, "confidence": 0,
+                "links": [], "photo_url": None, "photo_source_url": None, "confidence": 0,
                 "confidence_reason": "API error during profile lookup.",
             }}
 
@@ -851,7 +851,7 @@ async def _profile_one(
         return {**guest, "profile": {
             "summary": "Profile lookup failed — response could not be parsed.",
             "summary_es": "La búsqueda de perfil falló — la respuesta no pudo procesarse.",
-            "links": [], "photo_url": None, "confidence": 0,
+            "links": [], "photo_url": None, "photo_source_url": None, "confidence": 0,
             "confidence_reason": "JSON parse failure after all retries.",
         }}
     log.info(
@@ -888,12 +888,12 @@ async def _profile_one(
 
     # Build a unified candidate pool: Claude's suggestion + everything scraped from links.
     # Both go through the same scoring so the best signal wins regardless of source.
-    candidate_pool: list[tuple[int, str]] = []
+    candidate_pool: list[tuple[int, str, str]] = []
 
     if profile["photo_url"]:
         score = _score_photo_candidate(profile["photo_url"], name_parts, is_meta_tag=False)
         log.info("  Claude photo suggestion scored %d: %s", score, profile["photo_url"])
-        candidate_pool.append((score, profile["photo_url"]))
+        candidate_pool.append((score, profile["photo_url"], "gemini"))
 
     # Twitter/X: if any link is a twitter.com/x.com profile, resolve the profile image via
     # Twitter's public profile_image redirect (no auth needed; redirects to pbs.twimg.com).
@@ -923,7 +923,7 @@ async def _profile_one(
                 score = _score_photo_candidate(twimg, name_parts, is_meta_tag=False)
                 score += 4  # bonus: sourced from their own Twitter profile page
                 log.info("  Twitter profile image (score %d): %s", score, twimg)
-                candidate_pool.append((score, twimg))
+                candidate_pool.append((score, twimg, link))
 
     # Pages to scrape: links (includes resolved grounding URLs) + resolved grounding URLs
     # (in case some weren't added to links due to dedup) + email-domain bio pages.
@@ -942,38 +942,40 @@ async def _profile_one(
     # Score >= 4 required: score 2-3 means only page_bonus fired (name on page, nothing else)
     # — no name in image URL, no profile-signal, no bio-page source. Far too weak a signal;
     # these are typically article author thumbnails or unrelated site assets.
-    candidate_pool = [(s, u) for s, u in candidate_pool if s >= 4]
+    candidate_pool = [(s, u, src) for s, u, src in candidate_pool if s >= 4]
     candidate_pool.sort(key=lambda x: x[0], reverse=True)
     if candidate_pool:
-        log.info("  Top photo candidates: %s", [(s, u) for s, u in candidate_pool[:3]])
+        log.info("  Top photo candidates: %s", [(s, u) for s, u, _ in candidate_pool[:3]])
 
     profile["photo_url"] = None
     profile["photo_face_position"] = None
+    profile["photo_source_url"] = None
     if candidate_pool:
         top = candidate_pool[:5]
         log.info("  Vision-checking top %d candidate(s)…", len(top))
         checks = await asyncio.gather(
-            *[_check_is_headshot(claude, sem, url, full_name) for _, url in top]
+            *[_check_is_headshot(claude, sem, url, full_name) for _, url, _ in top]
         )
         # checks is list of (bool, str | None, str | None) — is_headshot, description, face_position
-        confirmed: list[tuple[int, str, str | None, str | None]] = [
-            (s, u, desc, face_pos)
-            for (s, u), (passed, desc, face_pos) in zip(top, checks)
+        confirmed: list[tuple[int, str, str, str | None, str | None]] = [
+            (s, u, src, desc, face_pos)
+            for (s, u, src), (passed, desc, face_pos) in zip(top, checks)
             if passed
         ]
-        for (s, u), (passed, desc, _fp) in zip(top, checks):
+        for (s, u, _src), (passed, desc, _fp) in zip(top, checks):
             status = "confirmed" if passed else "rejected"
             log.info("  Vision %s (score %d): %s", status, s, u)
 
         if confirmed:
             if len(confirmed) == 1:
-                best_url, best_face_pos = confirmed[0][1], confirmed[0][3]
+                best_url, best_source, best_face_pos = confirmed[0][1], confirmed[0][2], confirmed[0][4]
                 log.info("  1 confirmed headshot (score %d): %s", confirmed[0][0], best_url)
             else:
                 log.info("  %d confirmed headshots; running consistency check…", len(confirmed))
-                best_url, best_face_pos = await _select_by_consistency(claude, sem, confirmed, full_name)
+                best_url, best_source, best_face_pos = await _select_by_consistency(claude, sem, confirmed, full_name)
             profile["photo_url"] = best_url
             profile["photo_face_position"] = best_face_pos
+            profile["photo_source_url"] = best_source
         else:
             log.info("  No candidates passed vision check.")
 
@@ -982,6 +984,7 @@ async def _profile_one(
         hint = profile["links"][0] if profile["links"] else ""
         photo_url, source_url = await _find_photo(gemini, guest, hint)
         profile["photo_url"] = photo_url
+        profile["photo_source_url"] = source_url
         if source_url and source_url not in profile["links"]:
             if await asyncio.to_thread(_check_link, source_url):
                 profile["links"].append(source_url)
@@ -1028,7 +1031,7 @@ async def _profile_all(guests: list[dict]) -> list[dict]:
             profiled.append({**guest, "profile": {
                 "summary": "Profile lookup failed.",
                 "summary_es": "La búsqueda de perfil falló.",
-                "links": [], "photo_url": None, "confidence": 0,
+                "links": [], "photo_url": None, "photo_source_url": None, "confidence": 0,
                 "confidence_reason": "Unexpected error during profiling.",
             }})
         else:
