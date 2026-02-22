@@ -3,6 +3,7 @@
 import base64
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlparse
 
 _LOGO_PATH = Path(__file__).parent.parent / "assets" / "sabueso.png"
 
@@ -61,6 +62,28 @@ h1 { font-size: 22px; color: #1a1a2e; margin-bottom: 4px; }
 """
 
 
+_PLATFORM_LABELS = {
+    "linkedin.com": "LinkedIn",
+    "twitter.com": "Twitter / X",
+    "x.com": "Twitter / X",
+    "instagram.com": "Instagram",
+    "facebook.com": "Facebook",
+    "youtube.com": "YouTube",
+    "tiktok.com": "TikTok",
+    "threads.net": "Threads",
+}
+
+
+def _platform_label(url: str) -> str:
+    """Return a human-readable platform name for a URL, or the bare domain."""
+    lower = url.lower()
+    for domain, label in _PLATFORM_LABELS.items():
+        if domain in lower:
+            return label
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    return host or url
+
+
 def _fmt_date(iso: str) -> str:
     """Format 'YYYY-MM-DD' as 'Mon DD, YYYY'."""
     if not iso:
@@ -108,9 +131,9 @@ def _guest_card(guest: dict) -> str:
 
     links_html = ""
     if links:
-        items = "\n".join(f'<li><a href="{url}">{url}</a></li>' for url in links)
+        items = "\n".join(f'<li><a href="{url}">{_platform_label(url)}</a></li>' for url in links)
         links_html = f"""
-        <div class="links-label">Links</div>
+        <div class="links-label">Links explored/found</div>
         <ul class="links">{items}</ul>
         """
 
@@ -169,10 +192,15 @@ def build_html(guests_with_profiles: list[dict]) -> str:
       and guests <strong>arriving within the next 7 days</strong>. Guest profiles are researched
       automatically using Gemini with Google Search grounding — confidence scores reflect how
       reliably the correct individual could be identified from public sources. Do not treat
-      low-confidence profiles as verified.
+      low-confidence profiles as verified.<br><br>
+      <strong>Photo disclaimer:</strong> Profile photos are sourced automatically from publicly
+      accessible web pages and <strong>may not always be accurate</strong>. Due to authentication
+      restrictions, images from LinkedIn and Instagram cannot be retrieved. If a photo looks wrong
+      or is missing, search the guest&rsquo;s name directly &mdash; their LinkedIn or Instagram
+      profile is often the most reliable source.
     </div>
     <div class="trivia">
-      <strong>Sabueso</strong> (Spanish) &mdash; <em>bloodhound</em>. A dog bred to track scents
+      <strong>Sabueso</strong> &mdash; <em>bloodhound</em>. A dog bred to track scents
       across long distances, renowned for its relentless nose and ability to follow a trail no matter
       how cold. Here, Sabueso hunts down public information about arriving guests so staff at
       The Vines of Mendoza can greet every visitor with a personal touch.
