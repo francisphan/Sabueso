@@ -199,17 +199,17 @@ def build_html(guests_with_profiles: list[dict]) -> str:
     <p class="subtitle">On property &amp; arriving in the next 7 days &mdash; generated {today}</p>
     <div class="info-box">
       <strong>About this report</strong><br>
-      This is a bi-weekly automated briefing sent every Monday and Thursday at 08:00 ART.
+      This automated briefing is sent every Monday and Thursday at 05:00 ART.
       It covers all guests <strong>currently on property</strong> (checked in within the past 7 days)
       and guests <strong>arriving within the next 7 days</strong>. Guest profiles are researched
-      automatically using Gemini with Google Search grounding — confidence scores reflect how
-      reliably the correct individual could be identified from public sources. Do not treat
-      low-confidence profiles as verified.<br><br>
+      using AI (Gemini web search + Claude vision verification) and <strong>may contain
+      inaccuracies</strong>. Confidence scores reflect how reliably the correct individual could be
+      identified from public sources. <strong>Nothing in this report should be assumed as fact or
+      mentioned to guests</strong> &mdash; it is intended only as background context for staff.<br><br>
       <strong>Photo disclaimer:</strong> Profile photos are sourced automatically from publicly
-      accessible web pages and <strong>may not always be accurate</strong>. Due to authentication
+      accessible web pages and <strong>may not depict the correct person</strong>. Due to authentication
       restrictions, images from LinkedIn and Instagram cannot be retrieved. If a photo looks wrong
-      or is missing, search the guest&rsquo;s name directly &mdash; their LinkedIn or Instagram
-      profile is often the most reliable source.
+      or is missing, search the guest&rsquo;s name directly.
     </div>
     <div class="trivia">
       <strong>Sabueso</strong> &mdash; <em>bloodhound</em>. A dog bred to track scents
