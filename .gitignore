@@ -1,4 +1,5 @@
 .env
+.cache/
 
 # Python
 __pycache__/
