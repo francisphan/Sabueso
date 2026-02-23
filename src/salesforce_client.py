@@ -53,7 +53,8 @@ def fetch_upcoming_guests() -> list[dict]:
     records = result.get("records", [])
     log.info("Query returned %d record(s).", len(records))
 
-    guests = []
+    guests: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
     for rec in records:
         guest = {
             "first_name": rec.get("Guest_First_Name__c", ""),
@@ -67,10 +68,31 @@ def fetch_upcoming_guests() -> list[dict]:
             "country": rec.get("Country__c", ""),
             "language": rec.get("Language__c", ""),
         }
+        # Dedup on name + dates: catches duplicates even when city/email
+        # differ between Salesforce records (e.g. city "." vs "Las Condes").
+        dedup_key = (
+            guest["first_name"],
+            guest["last_name"],
+            guest["check_in"],
+            guest["check_out"],
+        )
+        if dedup_key in seen:
+            log.info(
+                "  Skipping duplicate: %s %s (%s - %s)",
+                guest["first_name"],
+                guest["last_name"],
+                guest["check_in"],
+                guest["check_out"],
+            )
+            continue
+        seen.add(dedup_key)
         log.debug(
             "  Guest: %s %s | check-in: %s | check-out: %s | villa: %s",
-            guest["first_name"], guest["last_name"],
-            guest["check_in"], guest["check_out"], guest["villa"] or "—",
+            guest["first_name"],
+            guest["last_name"],
+            guest["check_in"],
+            guest["check_out"],
+            guest["villa"] or "—",
         )
         guests.append(guest)
     return guests
