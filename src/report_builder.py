@@ -236,7 +236,8 @@ def build_html(guests_with_profiles: list[dict]) -> str:
       using AI (Gemini web search + Claude vision verification) and <strong>may contain
       inaccuracies</strong>. Confidence scores reflect how reliably the correct individual could be
       identified from public sources. <strong>Nothing in this report should be assumed as fact or
-      mentioned to guests</strong> &mdash; it is intended only as background context for staff.<br><br>
+      mentioned to guests</strong> &mdash; it is intended only as background context for staff.
+      <strong>Results can vary between reports, even for the same guest.</strong><br><br>
       <strong>Photo disclaimer:</strong> Profile photos are sourced automatically from publicly
       accessible web pages and <strong>may not depict the correct person</strong>. Due to authentication
       restrictions, images from LinkedIn and Instagram cannot be retrieved. If a photo looks wrong
