@@ -115,7 +115,7 @@ def _guest_card(guest: dict) -> str:
     today = date.today().isoformat()
     check_in_raw = guest.get("check_in", "")
     check_out_raw = guest.get("check_out", "")
-    on_property = bool(check_in_raw and check_out_raw and check_in_raw <= today < check_out_raw)
+    on_property = bool(check_in_raw and check_out_raw and check_in_raw <= today <= check_out_raw)
 
     location_parts = [guest.get("city", ""), guest.get("state", ""), guest.get("country", "")]
     location = ", ".join(p for p in location_parts if p) or "—"
@@ -181,7 +181,7 @@ def build_html(guests_with_profiles: list[dict]) -> str:
 
         def _is_on_property(g: dict) -> bool:
             ci, co = g.get("check_in", ""), g.get("check_out", "")
-            return bool(ci and co and ci <= today_iso < co)
+            return bool(ci and co and ci <= today_iso <= co)
 
         # Sort each segment by check-in date
         on_property = sorted(
