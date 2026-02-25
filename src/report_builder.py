@@ -115,7 +115,7 @@ def _guest_card(guest: dict) -> str:
     today = date.today().isoformat()
     check_in_raw = guest.get("check_in", "")
     check_out_raw = guest.get("check_out", "")
-    on_property = bool(check_in_raw and check_out_raw and check_in_raw < today <= check_out_raw)
+    on_property = bool(check_in_raw and check_out_raw and check_in_raw <= today < check_out_raw)
 
     location_parts = [guest.get("city", ""), guest.get("state", ""), guest.get("country", "")]
     location = ", ".join(p for p in location_parts if p) or "—"
@@ -177,8 +177,39 @@ def build_html(guests_with_profiles: list[dict]) -> str:
     logo_html = f'<img src="{logo_uri}" alt="Sabueso" class="logo">' if logo_uri else ""
 
     if guests_with_profiles:
-        cards = "\n".join(_guest_card(g) for g in guests_with_profiles)
-        body_html = cards
+        today_iso = date.today().isoformat()
+
+        def _is_on_property(g: dict) -> bool:
+            ci, co = g.get("check_in", ""), g.get("check_out", "")
+            return bool(ci and co and ci <= today_iso < co)
+
+        # Sort each segment by check-in date
+        on_property = sorted(
+            [g for g in guests_with_profiles if _is_on_property(g)],
+            key=lambda g: g.get("check_in", ""),
+        )
+        arriving = sorted(
+            [g for g in guests_with_profiles if not _is_on_property(g)],
+            key=lambda g: g.get("check_in", ""),
+        )
+
+        body_parts: list[str] = []
+        if on_property:
+            body_parts.append(
+                f'<h2 style="font-size:16px; color:#1565c0; margin:24px 0 12px; '
+                f'border-bottom:2px solid #e3f2fd; padding-bottom:6px;">'
+                f'On Property ({len(on_property)})</h2>'
+            )
+            body_parts.extend(_guest_card(g) for g in on_property)
+        if arriving:
+            body_parts.append(
+                f'<h2 style="font-size:16px; color:#555; margin:24px 0 12px; '
+                f'border-bottom:2px solid #eee; padding-bottom:6px;">'
+                f'Arriving Soon ({len(arriving)})</h2>'
+            )
+            body_parts.extend(_guest_card(g) for g in arriving)
+
+        body_html = "\n".join(body_parts)
     else:
         body_html = '<p class="empty">No guests arriving in the next 7 days.</p>'
 
