@@ -44,6 +44,10 @@ Fields:
     • Any other social media (YouTube, TikTok, Threads, etc.)
     • Official company/personal website or bio page — if the email domain is provided, check
       that domain's /about, /team, /people, or /staff page for a bio or profile of this person
+    • The person's OWN website — many professionals (writers, critics, consultants, executives)
+      operate a personal site under their name (e.g. firstnamelastname.com). Search specifically
+      for "site:{first}{last}.com" or "{full name} official website" and visit the result if found.
+      Always include this URL in links if it exists.
     • Major news or publication articles
   Do NOT mix links from different people with the same name.
   Do NOT include people-search aggregators (Spokeo, Whitepages, BeenVerified, etc.).
@@ -586,6 +590,43 @@ def _email_domain_bio_pages(email_domain: str, full_name: str = "") -> list[str]
     return pages
 
 
+def _name_based_domains(full_name: str) -> list[str]:
+    """Return candidate personal website URLs derived from the guest's name.
+
+    Many professionals (writers, critics, consultants) run a personal site
+    under their name — e.g. timatkin.com, bryandriscoll.com.  We probe the
+    most common patterns so the scraping step always checks these even when
+    Gemini's grounding search doesn't visit them.
+    """
+    parts = [p.lower() for p in full_name.split() if len(p) > 1]
+    if len(parts) < 2:
+        return []
+    first, last = parts[0], parts[-1]
+    domains = [
+        f"{first}{last}.com",       # timatkin.com
+        f"{first}-{last}.com",      # tim-atkin.com
+        f"{first}{last}.co.uk",     # timatkin.co.uk
+        f"{last}{first}.com",       # atkintim.com (rare but worth checking)
+    ]
+    pages: list[str] = []
+    for domain in domains:
+        try:
+            resp = requests.head(
+                f"https://{domain}", timeout=(3, 5), allow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if resp.status_code < 400:
+                base = f"https://{domain}"
+                pages.append(base)
+                pages.append(f"{base}/about")
+                pages.append(f"{base}/biography")
+                pages.append(f"{base}/bio")
+                log.info("  Name-based domain found: %s (status %d)", domain, resp.status_code)
+        except Exception:
+            pass
+    return pages
+
+
 
 async def _check_is_headshot(
     client: anthropic.AsyncAnthropic,
@@ -936,6 +977,15 @@ async def _profile_one(
     # Use resolved URLs rather than the original redirect wrappers so we fetch the actual
     # page directly (avoids Cloudflare/bot challenges triggered by Google's redirect service).
     domain_pages = _email_domain_bio_pages(email_domain, full_name)
+    name_pages = await asyncio.to_thread(_name_based_domains, full_name)
+    # Add confirmed personal website root URLs to profile links for the report
+    # (only root domains, not /about /bio subpages which are just scraping targets)
+    for np in name_pages:
+        parsed_np = urlparse(np)
+        if parsed_np.path in ("", "/") and np.rstrip("/") not in existing_links:
+            profile["links"].append(np)
+            existing_links.add(np.rstrip("/"))
+    domain_pages = list(dict.fromkeys(domain_pages + name_pages))  # dedup
     all_pages = list(dict.fromkeys(profile["links"] + resolved_grounding + domain_pages))  # dedup
     if all_pages:
         log.info("  Scraping %d page(s) for photo candidates (%d from email domain)…",
