@@ -67,6 +67,12 @@ def run_report(
     log.info("Profiling guests…")
     profiled = profile_guests(guests)
 
+    try:
+        from slack_notifier import post_review_messages
+        post_review_messages(profiled)
+    except Exception:
+        log.error("Slack notification failed (non-fatal)", exc_info=True)
+
     # Save per-run profiles for later comparison
     if cache_dir and run_id is not None:
         profile_cache = cache_dir / f"run_{run_id}_profiles.json"

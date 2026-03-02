@@ -5,6 +5,7 @@ Usage:
     python src/main.py --now                  # Run report immediately
     python src/main.py --now --to me@ex.com   # Override recipients
     python src/main.py --now --runs 5 --to me@ex.com  # 5 runs, cached SF data
+    python src/main.py --bot                  # Start Slack approval bot
 """
 
 import argparse
@@ -26,6 +27,11 @@ def main() -> None:
         description="Sabueso — Anticipatory Guest Report System"
     )
     parser.add_argument(
+        "--bot",
+        action="store_true",
+        help="Start the Slack approval bot (Socket Mode). Listens for button clicks in #sabueso-review.",
+    )
+    parser.add_argument(
         "--now",
         action="store_true",
         help="Run the report immediately instead of starting the scheduler.",
@@ -43,6 +49,11 @@ def main() -> None:
         help="Run the report N times. Salesforce results are cached after the first run.",
     )
     args = parser.parse_args()
+
+    if args.bot:
+        from slack_bot import start_bot
+        start_bot()
+        return
 
     recipients = [r.strip() for r in args.to.split(",") if r.strip()] if args.to else None
 

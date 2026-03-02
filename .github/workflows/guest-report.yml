@@ -36,4 +36,6 @@ jobs:
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
           GMAIL_SENDER: ${{ secrets.GMAIL_SENDER }}
           REPORT_SUBSCRIBERS: ${{ secrets.REPORT_SUBSCRIBERS }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_REVIEW_CHANNEL: ${{ secrets.SLACK_REVIEW_CHANNEL }}
         run: python3 src/main.py --now

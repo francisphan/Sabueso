@@ -6,3 +6,5 @@ google-auth-oauthlib
 google-api-python-client
 simple-salesforce
 schedule
+slack-sdk
+slack-bolt
