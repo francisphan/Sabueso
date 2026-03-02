@@ -46,7 +46,7 @@ Fields:
       that domain's /about, /team, /people, or /staff page for a bio or profile of this person
     • The person's OWN website — many professionals (writers, critics, consultants, executives)
       operate a personal site under their name (e.g. firstnamelastname.com). Search specifically
-      for "site:{first}{last}.com" or "{full name} official website" and visit the result if found.
+      for "site:{{first}}{{last}}.com" or "{{full name}} official website" and visit the result if found.
       Always include this URL in links if it exists.
     • Major news or publication articles
   Do NOT mix links from different people with the same name.
@@ -1083,7 +1083,7 @@ async def _profile_all(guests: list[dict]) -> list[dict]:
     for guest, result in zip(guests, results):
         if isinstance(result, BaseException):
             full_name = f"{guest['first_name']} {guest['last_name']}".strip()
-            log.error("Profiling task failed for %s: %s", full_name, result)
+            log.error("Profiling task failed for %s: %s", full_name, result, exc_info=result)
             profiled.append({**guest, "profile": {
                 "summary": "Profile lookup failed.",
                 "summary_es": "La búsqueda de perfil falló.",
