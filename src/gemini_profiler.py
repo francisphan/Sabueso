@@ -184,9 +184,26 @@ def _resolve_redirect(url: str) -> str:
     Used to unwrap Google's grounding-api-redirect wrapper URLs before storing
     them in the report so readers see the actual destination, not the proxy URL.
     """
+    _HEADERS = {"User-Agent": "Mozilla/5.0"}
+    is_grounding = "vertexaisearch.cloud.google.com" in url
+
+    if is_grounding:
+        # Grounding redirect URLs are slower — use GET with longer timeout + 1 retry
+        for attempt in range(2):
+            try:
+                resp = requests.get(url, timeout=(10, 20), allow_redirects=True,
+                                    headers=_HEADERS, stream=True)
+                resp.close()
+                return resp.url
+            except Exception:
+                if attempt == 0:
+                    log.warning("    Grounding redirect retry (attempt 1 failed): %s", url)
+        log.warning("    Grounding redirect failed after 2 attempts: %s", url)
+        return url
+
     try:
         resp = requests.head(url, timeout=(4, 8), allow_redirects=True,
-                             headers={"User-Agent": "Mozilla/5.0"})
+                             headers=_HEADERS)
         return resp.url
     except Exception:
         return url
@@ -213,7 +230,8 @@ _PROFILE_URL_SIGNALS = re.compile(
 )
 _NOISE_URL_SIGNALS = re.compile(
     r'(banner|hero|background|logo|icon|thumbnail|cover|placeholder|avatar-default'
-    r'|header|featured|splash|wide|social-share|og[-_]image)',
+    r'|header|featured|splash|wide|social-share|og[-_]image'
+    r'|sizechart|product|briefs|clothing|merchandise)',
     re.IGNORECASE,
 )
 _BIO_PAGE_SIGNALS = re.compile(
@@ -222,6 +240,21 @@ _BIO_PAGE_SIGNALS = re.compile(
 )
 # Matches landscape dimension patterns in URLs like 1200x628, 1280_720, 800-400
 _WIDE_DIMENSION_RE = re.compile(r'(\d{3,4})[x_\-](\d{3,4})')
+# Common photo/image terms that are NOT person names — used by wrong-person filename detection
+_PHOTO_NOISE_WORDS = frozenset({
+    "photo", "headshot", "portrait", "profile", "official", "image", "img",
+    "picture", "pic", "avatar", "thumb", "thumbnail", "crop", "square",
+    "small", "medium", "large", "original", "final", "edit", "resize",
+    "jpeg", "jpg", "png", "webp",
+    # Professional titles that appear in headshot filenames alongside the person's name
+    "ceo", "cto", "cfo", "coo", "cmo", "vp", "svp", "evp", "md", "phd",
+    "founder", "cofounder", "director", "president", "partner", "manager",
+    "sr", "jr", "dr", "chief", "head", "lead", "exec", "board",
+    # Contextual words that appear alongside a person's name in filenames
+    "team", "company", "corporate", "group", "event", "staff", "employee",
+    "speaker", "bio", "about", "annual", "award", "conference", "headshots",
+    "portraits", "press", "media", "news", "featured", "spotlight",
+})
 
 
 def _score_photo_candidate(
@@ -289,6 +322,28 @@ def _score_photo_candidate(
             and not any(p in filename_stem for p in name_parts)
             and not any(re.search(r"[0-9]", w) for w in filename_words)):
         score -= 3
+
+    # Penalty: filename contains a DIFFERENT person's name.
+    # e.g. "David-Drager.jpg" for guest "David Swirnow" → "Drager" ≠ any guest name part
+    # e.g. "Claude_S._Brinegar_official_photo.jpg" for guest "Tom Brinegar" → "Claude" ≠ "Tom"
+    # Skip: hash/UUID filenames (digits present), generic filenames (photo.jpg), or
+    # filenames where ALL name-like words match the guest.
+    # Filter filename words to just plausible name tokens.
+    # Strip trailing dots so initials like "s." become "s" and get filtered by length.
+    name_tokens = [
+        w for w in (fw.strip(".") for fw in filename_words)
+        if len(w) >= 2                         # skip initials like "s"
+        and not re.search(r"[0-9]", w)         # skip hashes/UUIDs/sizes
+        and w not in _PHOTO_NOISE_WORDS        # skip photo jargon
+    ]
+    if len(name_tokens) >= 2:
+        matching = [t for t in name_tokens if t in name_parts]
+        non_matching = [t for t in name_tokens if t not in name_parts]
+        # If any name-like tokens don't match the guest, this is likely a
+        # different person (e.g. shares a last name but different first name,
+        # or a completely unrelated person).
+        if non_matching:
+            score -= 15
 
     # Penalty: landscape dimensions in the URL suggest a banner/header crop.
     # Threshold 1.5 catches 3:2 landscape images (e.g. 1320x866 = 1.52) that are
@@ -955,8 +1010,6 @@ async def _profile_one(
         "yes" if profile["photo_url"] else "none",
     )
 
-    profile["links"] = await _validate_links(profile["links"])
-
     name_parts = [p.lower() for p in full_name.split() if len(p) > 2]
 
     # Resolve ALL grounding redirect wrappers to their actual destinations upfront.
@@ -973,7 +1026,14 @@ async def _profile_one(
         await asyncio.gather(*[_resolve_url(u) for u in grounding_urls])
     ) if grounding_urls else []
 
-    # Supplement displayed links with resolved grounding URLs
+    # Grounding URLs are pre-verified pages Gemini actually visited — skip validation.
+    # Only validate non-grounding links; corporate sites often block HEAD/GET requests,
+    # causing valid grounding links to be dropped.
+    grounding_set = {u.rstrip("/") for u in resolved_grounding}
+    non_grounding_links = [u for u in profile["links"] if u.rstrip("/") not in grounding_set]
+    profile["links"] = await _validate_links(non_grounding_links)
+
+    # Merge grounding URLs back in (pre-verified by Gemini, bypass validation)
     existing_links = {u.rstrip("/") for u in profile["links"]}
     for resolved in resolved_grounding:
         if resolved.rstrip("/") not in existing_links:
