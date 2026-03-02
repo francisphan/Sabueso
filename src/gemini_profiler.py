@@ -78,7 +78,7 @@ Fields:
 Person: {full_name}
 Home location: {location}
 Email domain: {email_domain}
-
+{existing_context}
 Return ONLY the JSON object, no markdown fences or extra text.
 If no public information is available, return:
 {{"summary": "No public information found.", "summary_es": "No se encontró información pública.", "links": [], "photo_url": null, "confidence": 0, "confidence_reason": "No public information found."}}
@@ -824,7 +824,50 @@ async def _profile_one(
     email = guest.get("email", "")
     email_domain = email.split("@")[-1] if "@" in email else "unknown"
     log.info("Profiling: %s (%s)…", full_name, location or "location unknown")
-    prompt = PROFILE_PROMPT.format(full_name=full_name, location=location, email_domain=email_domain)
+
+    # Build existing-context hints from Salesforce data so Gemini focuses on new info.
+    existing_context_parts: list[str] = []
+    account_title = guest.get("account_title", "")
+    account_description = guest.get("account_description", "")
+    account_website = guest.get("account_website", "")
+    if account_title:
+        existing_context_parts.append(
+            f"Known title: {account_title} — do not re-research the title, focus on other information."
+        )
+    if account_description:
+        existing_context_parts.append(
+            f"Existing context about this person: {account_description} "
+            f"— focus on finding genuinely NEW information not already captured above."
+        )
+    if account_website:
+        existing_context_parts.append(f"Known website: {account_website}")
+    existing_context = "\n".join(existing_context_parts)
+
+    # 3c: Cache-hit — skip Gemini+Claude pipeline if guest has complete SF profile.
+    if account_description and account_title and account_website:
+        log.info("Guest %s has complete SF profile — skipping Gemini research.", full_name)
+        cached_profile = {
+            "summary": account_description[:500],
+            "summary_es": "",
+            "links": [account_website],
+            "photo_url": None,
+            "photo_face_position": None,
+            "photo_source_url": None,
+            "confidence": 10,
+            "confidence_reason": "Profile data from Salesforce (cached).",
+        }
+        result = {**guest, "profile": cached_profile}
+        result["has_new_info"] = False
+        result["new_title"] = ""
+        result["new_bio"] = ""
+        result["new_website"] = ""
+        result["new_photo_url"] = ""
+        return result
+
+    prompt = PROFILE_PROMPT.format(
+        full_name=full_name, location=location, email_domain=email_domain,
+        existing_context=existing_context,
+    )
 
     # 5 retries for transient malformed JSON; blocked/filtered responses skip retries.
     _MAX_ATTEMPTS = 5
@@ -886,21 +929,25 @@ async def _profile_one(
                 await asyncio.sleep(min(2 ** attempt, 30))  # back-off, capped at 30s
         except Exception as exc:
             log.error("  Gemini API call failed for %s: %s", full_name, exc)
-            return {**guest, "profile": {
+            err = {**guest, "profile": {
                 "summary": "Profile lookup failed due to an API error.",
                 "summary_es": "La búsqueda de perfil falló por un error de API.",
                 "links": [], "photo_url": None, "photo_source_url": None, "confidence": 0,
                 "confidence_reason": "API error during profile lookup.",
-            }}
+            }, "has_new_info": False, "new_title": "", "new_bio": "",
+               "new_website": "", "new_photo_url": ""}
+            return err
 
     if profile is None:
         log.error("  Profile JSON could not be parsed for %s after %d attempts.", full_name, _MAX_ATTEMPTS)
-        return {**guest, "profile": {
+        err = {**guest, "profile": {
             "summary": "Profile lookup failed — response could not be parsed.",
             "summary_es": "La búsqueda de perfil falló — la respuesta no pudo procesarse.",
             "links": [], "photo_url": None, "photo_source_url": None, "confidence": 0,
             "confidence_reason": "JSON parse failure after all retries.",
-        }}
+        }, "has_new_info": False, "new_title": "", "new_bio": "",
+           "new_website": "", "new_photo_url": ""}
+        return err
     log.info(
         "  Profile received — confidence: %d/10 | links: %d | photo: %s",
         profile["confidence"],
@@ -1049,7 +1096,59 @@ async def _profile_one(
         full_name, profile["confidence"], len(profile["links"]),
         "found" if profile["photo_url"] else "not found",
     )
-    return {**guest, "profile": profile}
+
+    # 3b: Detect genuinely new information vs what's already in Salesforce.
+    result = {**guest, "profile": profile}
+    new_title = ""
+    new_bio = ""
+    new_website = ""
+    new_photo_url = ""
+
+    summary = profile.get("summary", "")
+    no_info = summary.lower().startswith("no public information found")
+
+    # New title: extract from summary if SF has no title
+    if not account_title and not no_info and summary:
+        title_m = re.search(
+            r'(?:is|serves as|works as|was)\s+(?:the\s+|a\s+|an\s+)?'
+            r'(.{3,60}?\s+(?:at|of|for)\s+.{2,60}?)(?:\.|,|\s+(?:and|who|based|in|with))',
+            summary, re.IGNORECASE,
+        )
+        if title_m:
+            new_title = title_m.group(1).strip()
+
+    # New bio: if no existing description and Gemini found something substantive
+    if not no_info and summary:
+        if not account_description:
+            new_bio = summary
+        elif len(summary) > 50 and summary.lower() not in account_description.lower():
+            new_bio = summary
+
+    # New website: if SF has none, look for a non-social-media link
+    _SOCIAL_DOMAINS = {"linkedin.com", "instagram.com", "twitter.com", "x.com",
+                       "facebook.com", "tiktok.com", "youtube.com", "threads.net"}
+    if not account_website:
+        for link in profile.get("links", []):
+            link_domain = urlparse(link).netloc.lower().lstrip("www.")
+            if link_domain and link_domain not in _SOCIAL_DOMAINS:
+                new_website = link
+                break
+
+    # New photo
+    if profile.get("photo_url"):
+        new_photo_url = profile["photo_url"]
+
+    result["new_title"] = new_title
+    result["new_bio"] = new_bio
+    result["new_website"] = new_website
+    result["new_photo_url"] = new_photo_url
+    result["has_new_info"] = bool(new_title or new_bio or new_website or new_photo_url)
+
+    if result["has_new_info"]:
+        new_fields = [k for k in ("new_title", "new_bio", "new_website", "new_photo_url") if result[k]]
+        log.info("  New info detected for %s: %s", full_name, ", ".join(new_fields))
+
+    return result
 
 
 async def _profile_all(guests: list[dict]) -> list[dict]:
@@ -1089,7 +1188,8 @@ async def _profile_all(guests: list[dict]) -> list[dict]:
                 "summary_es": "La búsqueda de perfil falló.",
                 "links": [], "photo_url": None, "photo_source_url": None, "confidence": 0,
                 "confidence_reason": "Unexpected error during profiling.",
-            }})
+            }, "has_new_info": False, "new_title": "", "new_bio": "",
+               "new_website": "", "new_photo_url": ""})
         else:
             profiled.append(result)
 

@@ -59,6 +59,10 @@ h1 { font-size: 22px; color: #1a1a2e; margin-bottom: 4px; }
 .trivia { background: #fffbf0; border-left: 3px solid #f9a825; border-radius: 4px;
           padding: 12px 16px; margin-bottom: 28px; font-size: 12px; color: #555; line-height: 1.6; }
 .trivia strong { color: #7b5800; }
+.returning { background: #e8f5e9; color: #2e7d32; }
+.staff-notes { background: #fff8e1; border-left: 3px solid #f9a825; border-radius: 4px;
+               padding: 12px 16px; margin-bottom: 12px; font-size: 13px; color: #555; line-height: 1.6; }
+.staff-notes strong { color: #7b5800; }
 """
 
 
@@ -82,6 +86,13 @@ def _platform_label(url: str) -> str:
             return label
     host = urlparse(url).netloc.lower().removeprefix("www.")
     return host or url
+
+
+def _ordinal(n: int) -> str:
+    """Return ordinal string: 1→'1st', 2→'2nd', 3→'3rd', 4→'4th', etc."""
+    if 11 <= (n % 100) <= 13:
+        return f"{n}th"
+    return f"{n}{['th','st','nd','rd'][n % 10] if n % 10 < 4 else 'th'}"
 
 
 def _fmt_date(iso: str) -> str:
@@ -141,27 +152,53 @@ def _guest_card(guest: dict) -> str:
     else:
         photo_html = '<div class="photo-placeholder">👤</div>'
 
+    # Build links list — prepend account website if available
+    all_links: list[str] = []
+    account_website = guest.get("account_website", "")
+    if account_website:
+        all_links.append(account_website)
+    all_links.extend(links)
+
     links_html = ""
-    if links:
-        items = "\n".join(f'<li><a href="{url}">{_platform_label(url)}</a></li>' for url in links)
+    if all_links:
+        link_items: list[str] = []
+        for i, url in enumerate(all_links):
+            if i == 0 and account_website and url == account_website:
+                link_items.append(f'<li><a href="{url}">Personal/Company Website</a></li>')
+            else:
+                link_items.append(f'<li><a href="{url}">{_platform_label(url)}</a></li>')
+        items = "\n".join(link_items)
         links_html = f"""
         <div class="links-label">Links explored/found</div>
         <ul class="links">{items}</ul>
         """
+
+    # Build staff notes section
+    account_desc = guest.get("account_description", "").strip()
+    res_comments = guest.get("reservation_comments", "").strip()
+    staff_notes_html = ""
+    if account_desc or res_comments:
+        parts: list[str] = []
+        if account_desc:
+            parts.append(f"<strong>Staff Notes:</strong> {account_desc}")
+        if res_comments and res_comments != account_desc:
+            parts.append(f"<strong>Reservation Comments:</strong> {res_comments}")
+        staff_notes_html = f'<div class="staff-notes">{"<br><br>".join(parts)}</div>'
 
     return f"""
     <div class="card">
       <div class="card-header">
         {photo_html}
         <div>
-          <p class="name">{full_name} {'<span class="badge on-property">On Property</span>' if on_property else ''}<span class="confidence {conf_class}">{conf_label}</span></p>
+          <p class="name">{full_name} {'<span class="badge on-property">On Property</span>' if on_property else ''}{f'<span class="badge returning">Returning &mdash; {_ordinal(guest.get("stay_count", 1))} stay</span>' if guest.get("stay_count", 1) > 1 else ''}<span class="confidence {conf_class}">{conf_label}</span></p>
           <p class="meta">
-            Check-in: {check_in} &nbsp;|&nbsp; Check-out: {check_out}<br>
+            {f'Title: {guest.get("account_title")}<br>' if guest.get("account_title") else ''}Check-in: {check_in} &nbsp;|&nbsp; Check-out: {check_out}<br>
             Villa: {villa} &nbsp;|&nbsp; Language: {language}<br>
             Location: {location}
           </p>
         </div>
       </div>
+      {staff_notes_html}
       {f'<p class="confidence-reason">{confidence_reason}</p>' if confidence_reason else ''}
       <p class="summary">{summary}</p>
       {f'<p class="summary-es">{summary_es}</p>' if summary_es else ''}
