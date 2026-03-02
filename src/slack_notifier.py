@@ -189,6 +189,8 @@ def post_review_messages(profiled_guests: list[dict]) -> None:
                 channel=channel,
                 text=f"Review: {name}",  # fallback for notifications
                 blocks=blocks,
+                unfurl_links=False,
+                unfurl_media=False,
             )
             log.info("Posted review message for %s.", name)
         except SlackApiError:
