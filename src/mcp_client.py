@@ -1,4 +1,4 @@
-"""Thin HTTP client for calling MCP server tools via JSON-RPC over SSE."""
+"""HTTP client for calling MCP server tools via streamable-http transport."""
 
 from __future__ import annotations
 
@@ -15,16 +15,79 @@ MCP_BASE_URL = os.getenv("MCP_BASE_URL", "http://localhost:8000")
 MCP_TOKEN = os.getenv("MCP_WRITE_TOKEN", "")
 MCP_TIMEOUT = int(os.getenv("MCP_TIMEOUT", "30"))
 
+_session_id: str | None = None
+
+
+def _headers() -> dict[str, str]:
+    h = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if MCP_TOKEN:
+        h["Authorization"] = f"Bearer {MCP_TOKEN}"
+    if _session_id:
+        h["Mcp-Session-Id"] = _session_id
+    return h
+
+
+def _endpoint() -> str:
+    return f"{MCP_BASE_URL}/mcp"
+
+
+def _initialize() -> None:
+    """Perform the MCP initialize handshake and store the session ID."""
+    global _session_id
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "sabueso", "version": "0.1.0"},
+        },
+    }
+
+    resp = requests.post(
+        _endpoint(),
+        json=payload,
+        headers=_headers(),
+        timeout=MCP_TIMEOUT,
+        stream=True,
+    )
+    resp.raise_for_status()
+
+    _session_id = resp.headers.get("mcp-session-id")
+    log.info("MCP session initialized: %s", _session_id)
+
+    # Consume the response stream
+    for _ in resp.iter_lines():
+        pass
+
+    # Send initialized notification
+    notif = {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+    }
+    resp2 = requests.post(
+        _endpoint(),
+        json=notif,
+        headers=_headers(),
+        timeout=MCP_TIMEOUT,
+    )
+    # Notification may return 202 or 200, both are fine
+    log.info("MCP initialized notification sent (status %d)", resp2.status_code)
+
 
 def call_tool(tool_name: str, arguments: dict) -> dict | list | str:
-    """Call an MCP tool and return the parsed result.
+    """Call an MCP tool and return the parsed result."""
+    global _session_id
 
-    Sends a JSON-RPC 2.0 request to the MCP server's SSE endpoint,
-    parses the event stream for the result, and returns it.
+    # Initialize session if needed
+    if _session_id is None:
+        _initialize()
 
-    Raises ValueError on protocol errors, requests.RequestException on
-    network errors.
-    """
     request_id = str(uuid.uuid4())
 
     payload = {
@@ -37,26 +100,33 @@ def call_tool(tool_name: str, arguments: dict) -> dict | list | str:
         },
     }
 
-    headers = {
-        "Content-Type": "application/json",
-    }
-    if MCP_TOKEN:
-        headers["Authorization"] = f"Bearer {MCP_TOKEN}"
-
     log.info("MCP call: %s(%s)", tool_name, arguments)
 
     resp = requests.post(
-        f"{MCP_BASE_URL}/sse",
+        _endpoint(),
         json=payload,
-        headers=headers,
+        headers=_headers(),
         timeout=MCP_TIMEOUT,
         stream=True,
     )
+
+    # Session expired — re-initialize and retry once
+    if resp.status_code in (400, 404):
+        log.warning("MCP session expired, re-initializing...")
+        _session_id = None
+        _initialize()
+        resp = requests.post(
+            _endpoint(),
+            json=payload,
+            headers=_headers(),
+            timeout=MCP_TIMEOUT,
+            stream=True,
+        )
+
     resp.raise_for_status()
 
-    # Parse SSE stream for the JSON-RPC response
     result = _parse_sse_response(resp, request_id)
-    log.info("MCP result for %s: %d chars", tool_name, len(str(result)))
+    log.info("MCP result for %s (%d chars): %.500s", tool_name, len(str(result)), str(result))
     return result
 
 
@@ -71,7 +141,6 @@ def _parse_sse_response(resp: requests.Response, request_id: str):
         if line.startswith("data: "):
             data_buffer.append(line[6:])
         elif line == "" and data_buffer:
-            # Empty line = end of event, try to parse accumulated data
             raw = "\n".join(data_buffer)
             data_buffer.clear()
 
@@ -80,16 +149,12 @@ def _parse_sse_response(resp: requests.Response, request_id: str):
             except json.JSONDecodeError:
                 continue
 
-            # Look for our JSON-RPC response
             if isinstance(message, dict) and message.get("id") == request_id:
                 if "error" in message:
                     err = message["error"]
                     raise ValueError(f"MCP error {err.get('code')}: {err.get('message')}")
+                return _extract_content(message.get("result", {}))
 
-                result = message.get("result", {})
-                return _extract_content(result)
-
-    # If we get here, check if any remaining data
     if data_buffer:
         raw = "\n".join(data_buffer)
         try:
@@ -106,24 +171,44 @@ def _parse_sse_response(resp: requests.Response, request_id: str):
 
 
 def _extract_content(result: dict):
-    """Extract the actual data from MCP's content wrapper.
+    """Extract data from MCP's content wrapper.
 
-    MCP tool results come wrapped as:
-    {"content": [{"type": "text", "text": "...json..."}]}
+    MCP tools may return:
+    - A single JSON object/array as text
+    - Multiple JSON objects concatenated (e.g. one per record)
+    - Plain text
     """
     content = result.get("content", [])
     if not content:
         return result
 
-    # MCP tools typically return a single text content block with JSON
     texts = [block.get("text", "") for block in content if block.get("type") == "text"]
     if not texts:
         return result
 
     combined = "\n".join(texts)
 
-    # Try to parse as JSON (most tools return JSON-serialized dicts/lists)
+    # Try parsing as a single JSON value first
     try:
         return json.loads(combined)
     except json.JSONDecodeError:
-        return combined
+        pass
+
+    # Try parsing as multiple concatenated JSON objects (one per line/block)
+    objects = []
+    for chunk in combined.split("\n"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if chunk.startswith("{") or chunk.startswith("["):
+            try:
+                objects.append(json.loads(chunk))
+                continue
+            except json.JSONDecodeError:
+                pass
+        # If we already collected some objects, this chunk might be part
+        # of a multi-line JSON block — fall through to raw return
+        if not objects:
+            return combined
+
+    return objects if objects else combined
