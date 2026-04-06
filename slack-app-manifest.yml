@@ -1,21 +1,36 @@
+_metadata:
+  major_version: 1
+  minor_version: 1
 display_information:
   name: Sabueso
-  description: Guest intelligence approval bot for The Vines of Mendoza. Reviews AI-researched guest profiles and writes approved data to Salesforce.
-  background_color: "#1a1a2e"
-
+  description: Guest intelligence and data bloodhound for The Vines of Mendoza
+  background_color: "#8B4513"
 features:
   bot_user:
     display_name: Sabueso
     always_online: true
-
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
 oauth_config:
   scopes:
     bot:
       - chat:write
-
+      - im:history
+      - im:read
+      - im:write
+      - app_mentions:read
+      - files:write
+      - files:read
+      - channels:history
+      - users:read
 settings:
+  event_subscriptions:
+    bot_events:
+      - message.im
+      - app_mention
   interactivity:
-    is_enabled: true
-  socket_mode_enabled: true
+    is_enabled: false
   org_deploy_enabled: false
+  socket_mode_enabled: true
   token_rotation_enabled: false

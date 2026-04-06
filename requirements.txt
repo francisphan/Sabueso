@@ -8,3 +8,4 @@ simple-salesforce
 schedule
 slack-sdk
 slack-bolt
+reportlab
