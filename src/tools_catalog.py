@@ -32,6 +32,26 @@ WRITE_OPERATIONS: frozenset[str] = frozenset(
 # Claude API tool definitions
 # ---------------------------------------------------------------------------
 TOOLS: list[dict] = [
+    # ── Person/guest lookup ─────────────────────────────────────────────
+    {
+        "name": "sf_find_by_email",
+        "description": (
+            "Find all Salesforce records for a person by email. Searches Contact, "
+            "Account (Person Account), Lead, and TVRS_Guest__c in one call. "
+            "This is the PRIMARY tool for looking up a person in Salesforce. "
+            "Use this instead of sf_soql_query when looking up a person by email."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "Email address to search for.",
+                },
+            },
+            "required": ["email"],
+        },
+    },
     # ── Cross-system lookups ──────────────────────────────────────────────
     {
         "name": "guest_360_profile",
