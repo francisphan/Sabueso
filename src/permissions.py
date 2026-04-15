@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from enum import Enum
 from pathlib import Path
 
@@ -29,6 +30,7 @@ class Role(str, Enum):
 
 _ACL_PATH = Path(os.getenv("ACL_FILE", "acl.json"))
 _DEFAULT_ADMIN = os.getenv("BOT_ADMIN_USER_ID", "U0ACKBHM2S1")
+_acl_lock = threading.Lock()
 
 
 def _load_acl() -> dict[str, str]:
@@ -47,7 +49,8 @@ def _save_acl(acl: dict[str, str]) -> None:
 
 
 def get_role(user_id: str) -> Role | None:
-    acl = _load_acl()
+    with _acl_lock:
+        acl = _load_acl()
     role_str = acl.get(user_id)
     if role_str is None:
         return None
@@ -89,27 +92,30 @@ def check_access(user_id: str, is_write_operation: bool = False) -> str | None:
 
 
 def add_user(user_id: str, role: Role) -> str:
-    acl = _load_acl()
-    was_existing = user_id in acl
-    acl[user_id] = role.value
-    _save_acl(acl)
+    with _acl_lock:
+        acl = _load_acl()
+        was_existing = user_id in acl
+        acl[user_id] = role.value
+        _save_acl(acl)
     action = "Updated" if was_existing else "Added"
     return f"{action} <@{user_id}> with *{role.value}* access."
 
 
 def remove_user(user_id: str) -> str:
-    acl = _load_acl()
-    if user_id not in acl:
-        return f"<@{user_id}> is not in the access list."
-    if user_id == _DEFAULT_ADMIN:
-        return "Cannot remove the bootstrap admin."
-    del acl[user_id]
-    _save_acl(acl)
+    with _acl_lock:
+        acl = _load_acl()
+        if user_id not in acl:
+            return f"<@{user_id}> is not in the access list."
+        if user_id == _DEFAULT_ADMIN:
+            return "Cannot remove the bootstrap admin."
+        del acl[user_id]
+        _save_acl(acl)
     return f"Removed <@{user_id}> from the access list."
 
 
 def list_users() -> str:
-    acl = _load_acl()
+    with _acl_lock:
+        acl = _load_acl()
     if not acl:
         return "No users in the access list."
     lines = []

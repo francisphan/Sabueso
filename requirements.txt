@@ -9,3 +9,4 @@ schedule
 slack-sdk
 slack-bolt
 reportlab
+pytest

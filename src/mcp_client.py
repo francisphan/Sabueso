@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import uuid
 
 import requests
@@ -16,6 +17,7 @@ MCP_TOKEN = os.getenv("MCP_WRITE_TOKEN", "")
 MCP_TIMEOUT = int(os.getenv("MCP_TIMEOUT", "30"))
 
 _session_id: str | None = None
+_session_lock = threading.Lock()
 
 
 def _headers() -> dict[str, str]:
@@ -35,7 +37,10 @@ def _endpoint() -> str:
 
 
 def _initialize() -> None:
-    """Perform the MCP initialize handshake and store the session ID."""
+    """Perform the MCP initialize handshake and store the session ID.
+
+    Raises on failure so callers can handle gracefully.
+    """
     global _session_id
 
     payload = {
@@ -49,14 +54,19 @@ def _initialize() -> None:
         },
     }
 
-    resp = requests.post(
-        _endpoint(),
-        json=payload,
-        headers=_headers(),
-        timeout=MCP_TIMEOUT,
-        stream=True,
-    )
-    resp.raise_for_status()
+    try:
+        resp = requests.post(
+            _endpoint(),
+            json=payload,
+            headers=_headers(),
+            timeout=MCP_TIMEOUT,
+            stream=True,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        log.error("MCP initialization failed: %s", exc)
+        _session_id = None
+        raise ConnectionError(f"MCP server unavailable: {exc}") from exc
 
     _session_id = resp.headers.get("mcp-session-id")
     log.info("MCP session initialized: %s", _session_id)
@@ -70,23 +80,27 @@ def _initialize() -> None:
         "jsonrpc": "2.0",
         "method": "notifications/initialized",
     }
-    resp2 = requests.post(
-        _endpoint(),
-        json=notif,
-        headers=_headers(),
-        timeout=MCP_TIMEOUT,
-    )
-    # Notification may return 202 or 200, both are fine
-    log.info("MCP initialized notification sent (status %d)", resp2.status_code)
+    try:
+        resp2 = requests.post(
+            _endpoint(),
+            json=notif,
+            headers=_headers(),
+            timeout=MCP_TIMEOUT,
+        )
+        # Notification may return 202 or 200, both are fine
+        log.info("MCP initialized notification sent (status %d)", resp2.status_code)
+    except requests.RequestException:
+        log.warning("MCP initialized notification failed (non-fatal)")
 
 
 def call_tool(tool_name: str, arguments: dict) -> dict | list | str:
     """Call an MCP tool and return the parsed result."""
     global _session_id
 
-    # Initialize session if needed
-    if _session_id is None:
-        _initialize()
+    # Initialize session if needed (thread-safe)
+    with _session_lock:
+        if _session_id is None:
+            _initialize()
 
     request_id = str(uuid.uuid4())
 
@@ -110,11 +124,12 @@ def call_tool(tool_name: str, arguments: dict) -> dict | list | str:
         stream=True,
     )
 
-    # Session expired — re-initialize and retry once
+    # Session expired — re-initialize and retry once (thread-safe)
     if resp.status_code in (400, 404):
         log.warning("MCP session expired, re-initializing...")
-        _session_id = None
-        _initialize()
+        with _session_lock:
+            _session_id = None
+            _initialize()
         resp = requests.post(
             _endpoint(),
             json=payload,

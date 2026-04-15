@@ -285,7 +285,13 @@ def run_agent(
                 log.info("  Tool %s returned %d chars: %.1000s", tool_name, len(result_str), result_str)
             except Exception as e:
                 log.error("  Tool %s FAILED: %s", tool_name, e, exc_info=True)
-                result_str = json.dumps({"error": str(e)})
+                # Sanitize: only pass the exception type and a generic message
+                # to Claude — the full traceback stays in logs only.
+                err_type = type(e).__name__
+                result_str = json.dumps({
+                    "error": f"Tool {tool_name} failed ({err_type}). "
+                             "The error has been logged for investigation."
+                })
 
             tool_results.append({
                 "type": "tool_result",

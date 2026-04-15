@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 from mcp_client import call_tool
@@ -16,7 +17,11 @@ log = logging.getLogger(__name__)
 
 # Per-user conversation history keyed by Slack user ID.
 _conversations: dict[str, list[dict]] = {}
+_conversations_lock = threading.Lock()
 _MAX_HISTORY = 20
+
+# Slack message character limit (actual is 40k, leave margin).
+_SLACK_MAX_CHARS = 39_000
 
 
 # ── Public entry points (called by slack_bot.py) ────────────────────────────
@@ -58,33 +63,73 @@ def _process_message(
 ):
     reply_ts = thread_ts or None
 
-    # Admin commands bypass NLP
-    admin_response = parse_admin_command(text, user_id)
-    if admin_response is not None:
-        say(text=admin_response, thread_ts=reply_ts)
+    try:
+        # Admin commands bypass NLP
+        admin_response = parse_admin_command(text, user_id)
+        if admin_response is not None:
+            say(text=admin_response, thread_ts=reply_ts)
+            return
+
+        # Access check
+        denial = check_access(user_id)
+        if denial:
+            say(text=denial, thread_ts=reply_ts)
+            return
+
+        say(text="_Sniffing around..._", thread_ts=reply_ts)
+
+        # Snapshot conversation history under lock
+        with _conversations_lock:
+            history = list(_conversations.get(user_id, []))
+
+        # Run the agentic loop
+        response = run_agent(
+            message=text,
+            tool_executor=call_tool,
+            conversation_history=history or None,
+        )
+
+        # Send response, chunking if it exceeds Slack's limit
+        _send_response(say, response, reply_ts)
+
+        # Update conversation history under lock
+        history_entries = build_history_from_agent_run(text, response)
+        with _conversations_lock:
+            hist = _conversations.setdefault(user_id, [])
+            hist.extend(history_entries)
+            if len(hist) > _MAX_HISTORY * 2:
+                _conversations[user_id] = hist[-_MAX_HISTORY * 2:]
+
+    except Exception:
+        log.exception("Unhandled error processing message from user=%s", user_id)
+        try:
+            say(
+                text="Sorry, something went wrong on my end. Please try again.",
+                thread_ts=reply_ts,
+            )
+        except Exception:
+            log.exception("Failed to send error message to user=%s", user_id)
+
+
+def _send_response(say, text: str, thread_ts: str | None) -> None:
+    """Send a response to Slack, chunking if it exceeds the character limit."""
+    if len(text) <= _SLACK_MAX_CHARS:
+        say(text=text, thread_ts=thread_ts)
         return
 
-    # Access check
-    denial = check_access(user_id)
-    if denial:
-        say(text=denial, thread_ts=reply_ts)
-        return
+    # Split on double-newlines (paragraph boundaries) to keep chunks readable
+    chunks: list[str] = []
+    current = ""
+    for paragraph in text.split("\n\n"):
+        candidate = f"{current}\n\n{paragraph}" if current else paragraph
+        if len(candidate) > _SLACK_MAX_CHARS and current:
+            chunks.append(current)
+            current = paragraph
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
 
-    say(text="_Sniffing around..._", thread_ts=reply_ts)
-
-    # Run the agentic loop
-    history = _conversations.get(user_id, [])
-    response = run_agent(
-        message=text,
-        tool_executor=call_tool,
-        conversation_history=history or None,
-    )
-
-    say(text=response, thread_ts=reply_ts)
-
-    # Update conversation history (compact: just user message + final answer)
-    history_entries = build_history_from_agent_run(text, response)
-    history = _conversations.setdefault(user_id, [])
-    history.extend(history_entries)
-    if len(history) > _MAX_HISTORY * 2:
-        _conversations[user_id] = history[-_MAX_HISTORY * 2:]
+    for i, chunk in enumerate(chunks):
+        suffix = f"\n_({i + 1}/{len(chunks)})_" if len(chunks) > 1 else ""
+        say(text=chunk + suffix, thread_ts=thread_ts)
