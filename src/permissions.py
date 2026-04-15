@@ -143,7 +143,7 @@ def parse_admin_command(text: str, requesting_user_id: str) -> str | None:
         return list_users()
 
     if cmd == "add" and len(parts) >= 4:
-        target = parts[2].strip("<@>")
+        target = parts[2].strip("<@>").split("|")[0]
         role_str = parts[3].lower()
         try:
             role = Role(role_str)
@@ -152,7 +152,7 @@ def parse_admin_command(text: str, requesting_user_id: str) -> str | None:
         return add_user(target, role)
 
     if cmd == "remove" and len(parts) >= 3:
-        target = parts[2].strip("<@>")
+        target = parts[2].strip("<@>").split("|")[0]
         return remove_user(target)
 
     return _admin_help()
