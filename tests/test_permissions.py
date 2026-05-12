@@ -11,6 +11,7 @@ import permissions
 from permissions import (
     Role,
     add_user,
+    bulk_add_users,
     can_write,
     check_access,
     get_role,
@@ -201,6 +202,60 @@ class TestParseAdminCommand:
         """<@> with nothing inside should not crash."""
         result = parse_admin_command("!access add <@> read_only", ADMIN_ID)
         assert result is not None  # should either add empty or show help, not crash
+
+    def test_bulk_add_three_users(self):
+        result = parse_admin_command(
+            "!access bulk-add read_only <@UA> <@UB> <@UC>", ADMIN_ID
+        )
+        assert "Added (3)" in result
+        for uid in ("UA", "UB", "UC"):
+            assert get_role(uid) == Role.READ_ONLY
+
+    def test_bulk_add_with_display_names(self):
+        result = parse_admin_command(
+            "!access bulk-add read_only <@UA|alice> <@UB|bob>", ADMIN_ID
+        )
+        assert "Added (2)" in result
+        assert is_authorized("UA")
+        assert is_authorized("UB")
+        assert not is_authorized("UA|alice")
+
+    def test_bulk_add_mixed_new_and_existing(self):
+        add_user("UEXISTING", Role.READ_ONLY)
+        result = parse_admin_command(
+            "!access bulk-add read_only <@UEXISTING> <@UNEW>", ADMIN_ID
+        )
+        assert "Added (1)" in result
+        assert "Already on list (1)" in result
+
+    def test_bulk_add_invalid_role(self):
+        result = parse_admin_command("!access bulk-add superuser <@UA> <@UB>", ADMIN_ID)
+        assert "Unknown role" in result
+        assert not is_authorized("UA")
+
+    def test_bulk_add_no_mentions_shows_help(self):
+        result = parse_admin_command("!access bulk-add read_only", ADMIN_ID)
+        assert "Access management commands" in result
+
+    def test_bulk_add_non_admin_rejected(self):
+        result = parse_admin_command(
+            "!access bulk-add read_only <@UA> <@UB>", UNKNOWN_ID
+        )
+        assert result == "Only admins can manage access."
+        assert not is_authorized("UA")
+
+
+class TestBulkAddUsers:
+    def test_bulk_add_basic(self):
+        result = bulk_add_users(["U1", "U2"], Role.READ_ONLY)
+        assert "Added (2)" in result
+        assert is_authorized("U1")
+        assert is_authorized("U2")
+
+    def test_bulk_add_skips_empty_ids(self):
+        result = bulk_add_users(["U1", "", "U2"], Role.READ_ONLY)
+        assert "Added (2)" in result
+        assert not is_authorized("")
 
 
 # ── ACL file edge cases ───────────────────────────────────────────────────

@@ -101,6 +101,31 @@ def add_user(user_id: str, role: Role) -> str:
     return f"{action} <@{user_id}> with *{role.value}* access."
 
 
+def bulk_add_users(user_ids: list[str], role: Role) -> str:
+    added: list[str] = []
+    updated: list[str] = []
+    with _acl_lock:
+        acl = _load_acl()
+        for uid in user_ids:
+            if not uid:
+                continue
+            if uid in acl:
+                updated.append(uid)
+            else:
+                added.append(uid)
+            acl[uid] = role.value
+        _save_acl(acl)
+
+    lines = [f"Bulk-add with *{role.value}* access:"]
+    if added:
+        lines.append(f"• Added ({len(added)}): " + " ".join(f"<@{u}>" for u in added))
+    if updated:
+        lines.append(f"• Already on list ({len(updated)}): " + " ".join(f"<@{u}>" for u in updated))
+    if not added and not updated:
+        lines.append("• No valid user mentions found.")
+    return "\n".join(lines)
+
+
 def remove_user(user_id: str) -> str:
     with _acl_lock:
         acl = _load_acl()
@@ -124,12 +149,18 @@ def list_users() -> str:
     return "*Authorized users:*\n" + "\n".join(lines)
 
 
+def _parse_user_mention(token: str) -> str:
+    """Extract user ID from a `<@U12345>` or `<@U12345|name>` token."""
+    return token.strip("<@>").split("|")[0]
+
+
 def parse_admin_command(text: str, requesting_user_id: str) -> str | None:
     """Parse admin commands from message text.
 
     Supported:
         !access list
         !access add <@U12345> read_only|admin
+        !access bulk-add read_only|admin <@U1> <@U2> ...
         !access remove <@U12345>
     """
     text = text.strip()
@@ -149,7 +180,7 @@ def parse_admin_command(text: str, requesting_user_id: str) -> str | None:
         return list_users()
 
     if cmd == "add" and len(parts) >= 4:
-        target = parts[2].strip("<@>").split("|")[0]
+        target = _parse_user_mention(parts[2])
         role_str = parts[3].lower()
         try:
             role = Role(role_str)
@@ -157,8 +188,17 @@ def parse_admin_command(text: str, requesting_user_id: str) -> str | None:
             return f"Unknown role `{role_str}`. Use `admin` or `read_only`."
         return add_user(target, role)
 
+    if cmd == "bulk-add" and len(parts) >= 4:
+        role_str = parts[2].lower()
+        try:
+            role = Role(role_str)
+        except ValueError:
+            return f"Unknown role `{role_str}`. Use `admin` or `read_only`."
+        user_ids = [_parse_user_mention(p) for p in parts[3:]]
+        return bulk_add_users(user_ids, role)
+
     if cmd == "remove" and len(parts) >= 3:
-        target = parts[2].strip("<@>").split("|")[0]
+        target = _parse_user_mention(parts[2])
         return remove_user(target)
 
     return _admin_help()
@@ -170,5 +210,6 @@ def _admin_help() -> str:
         "• `!access list` — show authorized users\n"
         "• `!access add @user admin` — grant read+write access\n"
         "• `!access add @user read_only` — grant read-only access\n"
+        "• `!access bulk-add read_only @user1 @user2 ...` — grant access to many at once\n"
         "• `!access remove @user` — revoke access"
     )
