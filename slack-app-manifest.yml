@@ -24,6 +24,7 @@ oauth_config:
       - files:read
       - channels:history
       - users:read
+      - users:read.email
 settings:
   event_subscriptions:
     bot_events:

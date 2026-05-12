@@ -29,7 +29,8 @@
         "files:write",
         "files:read",
         "channels:history",
-        "users:read"
+        "users:read",
+        "users:read.email"
       ]
     }
   },
