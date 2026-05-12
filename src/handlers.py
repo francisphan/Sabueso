@@ -15,10 +15,16 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Per-user conversation history keyed by Slack user ID.
-_conversations: dict[str, list[dict]] = {}
+# Conversation history keyed by (user_id, channel, thread_ts).
+# Isolates DMs from channel @mentions, and each channel thread from the next,
+# so private context doesn't bleed into public replies for the same user.
+_conversations: dict[tuple[str, str, str], list[dict]] = {}
 _conversations_lock = threading.Lock()
 _MAX_HISTORY = 20
+
+
+def _convo_key(user_id: str, channel: str, thread_ts: str | None) -> tuple[str, str, str]:
+    return (user_id, channel, thread_ts or "")
 
 # Slack message character limit (actual is 40k, leave margin).
 _SLACK_MAX_CHARS = 39_000
@@ -78,9 +84,11 @@ def _process_message(
 
         say(text="_Sniffing around..._", thread_ts=reply_ts)
 
+        key = _convo_key(user_id, channel, thread_ts)
+
         # Snapshot conversation history under lock
         with _conversations_lock:
-            history = list(_conversations.get(user_id, []))
+            history = list(_conversations.get(key, []))
 
         # Run the agentic loop
         response = run_agent(
@@ -95,10 +103,10 @@ def _process_message(
         # Update conversation history under lock
         history_entries = build_history_from_agent_run(text, response)
         with _conversations_lock:
-            hist = _conversations.setdefault(user_id, [])
+            hist = _conversations.setdefault(key, [])
             hist.extend(history_entries)
             if len(hist) > _MAX_HISTORY * 2:
-                _conversations[user_id] = hist[-_MAX_HISTORY * 2:]
+                _conversations[key] = hist[-_MAX_HISTORY * 2:]
 
     except Exception:
         log.exception("Unhandled error processing message from user=%s", user_id)
