@@ -40,10 +40,21 @@ def _load_acl() -> dict[str, str]:
             return {uid: role for uid, role in data.items()}
         except (json.JSONDecodeError, AttributeError):
             log.warning("Corrupt ACL file at %s — falling back to defaults", _ACL_PATH)
-    return {_DEFAULT_ADMIN: Role.ADMIN}
+            return {_DEFAULT_ADMIN: Role.ADMIN}
+
+    # Fresh install (or fresh persistent volume): seed with the bootstrap admin
+    # and persist immediately so the on-disk file becomes the source of truth.
+    bootstrap = {_DEFAULT_ADMIN: Role.ADMIN.value}
+    try:
+        _save_acl(bootstrap)
+        log.info("Bootstrapped ACL at %s with admin %s", _ACL_PATH, _DEFAULT_ADMIN)
+    except OSError as exc:
+        log.warning("Could not persist bootstrap ACL to %s (%s) — running in-memory", _ACL_PATH, exc)
+    return bootstrap
 
 
 def _save_acl(acl: dict[str, str]) -> None:
+    _ACL_PATH.parent.mkdir(parents=True, exist_ok=True)
     _ACL_PATH.write_text(json.dumps(acl, indent=2))
     log.info("ACL saved to %s", _ACL_PATH)
 

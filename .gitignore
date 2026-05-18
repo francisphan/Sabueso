@@ -1,5 +1,6 @@
 .env
 .cache/
+acl.json
 
 # Python
 __pycache__/
