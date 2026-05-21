@@ -150,7 +150,7 @@ def _sosl_search_person(hint: str) -> list[dict]:
         "Account(Id, Name, PersonEmail, IsPersonAccount), "
         "Lead(Id, FirstName, LastName, Email, Company)"
     )
-    result = call_tool("sf_search", {"search_str": sosl})
+    result = call_tool("sf_search", {"sosl_query": sosl})
 
     # Normalise envelope: sf_search returns {"searchRecords": [...]} or a list.
     if isinstance(result, list):

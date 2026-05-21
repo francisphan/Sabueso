@@ -242,17 +242,19 @@ TOOLS: list[dict] = [
         "name": "sf_search",
         "description": (
             "Perform a SOSL search across Salesforce. Good for free-text / "
-            "fuzzy searches when the user doesn't specify exact field values."
+            "fuzzy searches when the user doesn't specify exact field values. "
+            "Use sosl_query for a full SOSL string (e.g. \"FIND {John Smith} "
+            "IN ALL FIELDS RETURNING Contact, Lead, Account\")."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "search_str": {
+                "sosl_query": {
                     "type": "string",
-                    "description": "SOSL search expression.",
+                    "description": "Full SOSL query string.",
                 },
             },
-            "required": ["search_str"],
+            "required": ["sosl_query"],
         },
     },
     {
