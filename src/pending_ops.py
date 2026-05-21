@@ -38,6 +38,9 @@ _pending: dict[str, PendingOp] = {}
 _lock = threading.Lock()
 
 
+_DISPATCHER_INJECTED_KEYS = frozenset({"slack_user_id", "slack_client"})
+
+
 def register(
     *,
     tool_name: str,
@@ -49,11 +52,22 @@ def register(
     user_message: str = "",
     ttl_seconds: int = _TTL_SECONDS,
 ) -> PendingOp:
+    # Defensively strip dispatcher-only keys. If the LLM somehow emits them
+    # (prompt injection or spec drift), unpacking via **op.arguments would
+    # collide with the explicit kwargs in handlers and raise TypeError.
+    safe_args = {
+        k: v for k, v in (arguments or {}).items() if k not in _DISPATCHER_INJECTED_KEYS
+    }
+    if len(safe_args) != len(arguments or {}):
+        log.warning(
+            "Stripped dispatcher-injected keys from pending op arguments (tool=%s)",
+            tool_name,
+        )
     action_id = uuid.uuid4().hex
     op = PendingOp(
         action_id=action_id,
         tool_name=tool_name,
-        arguments=arguments,
+        arguments=safe_args,
         summary=summary,
         requester_user_id=requester_user_id,
         channel=channel,
@@ -68,15 +82,22 @@ def register(
 
 
 def pop(action_id: str) -> PendingOp | None:
-    """Remove and return a pending op. Returns None if missing or expired."""
+    """Remove and return a pending op. Returns None if missing or expired.
+
+    Callers in a shared-channel context MUST verify the clicker matches
+    op.requester_user_id; prefer pop_if_authorized for atomic auth gating.
+    """
     with _lock:
         _purge_expired_locked()
-        op = _pending.pop(action_id, None)
-    if op is None:
-        return None
-    if op.expires_at < time.time():
-        return None
-    return op
+        op = _pending.get(action_id)
+        if op is None:
+            return None
+        if op.expires_at < time.time():
+            del _pending[action_id]
+            log.info("Pending op %s expired at pop time", action_id)
+            return None
+        del _pending[action_id]
+        return op
 
 
 def pop_if_authorized(

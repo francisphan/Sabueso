@@ -66,14 +66,20 @@ def _opp_url(opp_id: str) -> str:
 
 
 def _sanitize_sosl(s: str) -> str:
-    """Escape characters that have special meaning inside SOSL search terms."""
-    # Order matters: escape backslash first, then braces/quotes.
+    """Escape every reserved SOSL operator so rep-controlled text can't expand
+    the search beyond the literal hint (no OR-chains, no wildcards, no NOTs,
+    no brace breakouts).
+    """
+    # Order matters: escape backslash first, then everything else.
     s = s.replace("\\", "\\\\")
-    s = s.replace("{", "\\{")
-    s = s.replace("}", "\\}")
-    s = s.replace("'", "\\'")
-    s = s.replace('"', '\\"')
+    for ch in ("{", "}", "'", '"', "?", "&", "|", "!", "*", "(", ")", "[", "]", "^", "~", "+", "-", ":"):
+        s = s.replace(ch, f"\\{ch}")
     return s
+
+
+def _escape_soql_like(s: str) -> str:
+    """Escape SOQL LIKE wildcards `%` and `_` in user-supplied fragments."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _records(result: Any) -> list[dict]:
@@ -248,7 +254,20 @@ def create_opportunity_for_person(
             return {"status": "invalid_subject", "subject": subj}
 
     # 3. Resolve person via SOSL.
-    candidates = _sosl_search_person(person_hint)
+    hint = (person_hint or "").strip()
+    if not hint:
+        return {
+            "status": "needs_person_details",
+            "message": "I don't see anyone matching. Can you give me their email or phone?",
+        }
+    try:
+        candidates = _sosl_search_person(hint)
+    except Exception:
+        log.exception("SOSL lookup failed for person_hint=%r", hint)
+        return {
+            "status": "needs_person_details",
+            "message": "I couldn't run the lookup. Can you give me their email or phone?",
+        }
 
     # 4 / 5 / 6. Handle 0, >1, or exactly 1 candidate.
     if not candidates:
@@ -345,12 +364,25 @@ def create_opportunity_for_person(
         try:
             task_result = call_tool("sf_create_record", {"object_name": "Task", "data": task_data})
             task_id = task_result.get("id") if isinstance(task_result, dict) else None
-            touch_results.append({"subject": subj, "ok": bool(task_id), "task_id": task_id})
+            touch_results.append({
+                "subject": subj,
+                "ok": bool(task_id),
+                "task_id": task_id,
+                "notes": touch_notes,
+                "when": touch_when.isoformat(),
+            })
         except Exception as exc:
             log.exception("Failed to create Task (subject=%r) on opp %s", subj, opp_id)
-            touch_results.append({"subject": subj, "ok": False, "error": type(exc).__name__})
+            touch_results.append({
+                "subject": subj,
+                "ok": False,
+                "error": type(exc).__name__,
+                "notes": touch_notes,
+                "when": touch_when.isoformat(),
+            })
 
-    # 12. Audit.
+    # 12. Audit. Include rep-authored content (notes, person email) so the
+    # local audit trail reproduces what was written without needing SF.
     try:
         audit.record_write(
             {
@@ -361,6 +393,8 @@ def create_opportunity_for_person(
                 "product": product,
                 "person_account_id": account_id,
                 "person_name": account_name,
+                "person_email": person.get("email") or "",
+                "notes": notes or "",
                 "touches": touch_results,
                 "lead_source": lead_source,
             }
@@ -413,8 +447,9 @@ def log_touch(
         opp_id = opp_hint
         opp_name = opp_hint
     elif opp_hint:
-        # Name fragment search.
-        escaped = opp_hint.replace("\\", "\\\\").replace("'", "\\'")
+        # Name fragment search. Escape SOQL string literal AND LIKE wildcards
+        # so a rep typing "%" doesn't enumerate every open opportunity.
+        escaped = _escape_soql_like(opp_hint).replace("'", "\\'")
         query = (
             f"SELECT Id, Name, StageName, IsClosed, Account.Name "
             f"FROM Opportunity "
@@ -425,7 +460,7 @@ def log_touch(
             result = call_tool("sf_soql_query", {"query_str": query})
         except Exception as exc:
             log.exception("SOQL opp search failed for hint %r", opp_hint)
-            return {"status": "create_failed", "error": str(exc)}
+            return {"status": "search_failed", "error": str(exc)}
 
         opps = _records(result)
         if not opps:
@@ -451,7 +486,20 @@ def log_touch(
 
     elif person_hint:
         # Resolve person first.
-        candidates = _sosl_search_person(person_hint)
+        hint = person_hint.strip()
+        if not hint:
+            return {
+                "status": "no_open_opps",
+                "message": "I need a person name/email or an opportunity hint to find the right opp.",
+            }
+        try:
+            candidates = _sosl_search_person(hint)
+        except Exception:
+            log.exception("SOSL lookup failed for person_hint=%r", hint)
+            return {
+                "status": "no_open_opps",
+                "message": "I couldn't run the lookup. Can you give me their email or phone?",
+            }
         if not candidates:
             return {
                 "status": "no_open_opps",
@@ -475,13 +523,23 @@ def log_touch(
 
         acct_id = candidates[0].get("account_id")
         if not acct_id:
-            return {
-                "status": "no_open_opps",
-                "message": (
-                    f"Found \"{candidates[0]['name']}\" as a Lead (not yet converted). "
+            source = candidates[0].get("source", "")
+            name = candidates[0]["name"]
+            if source == "Lead":
+                msg = (
+                    f"Found \"{name}\" as a Lead (not yet converted). "
                     "No Opportunities can be linked until the Lead is converted to a Contact/Account."
-                ),
-            }
+                )
+            else:
+                msg = (
+                    f"Found \"{name}\" but they have no Account on file. "
+                    "Opportunities need an Account — link this person to one in Salesforce first."
+                )
+            return {"status": "no_open_opps", "message": msg}
+
+        if not _is_sf_id(acct_id):
+            log.warning("SOSL returned non-ID account_id %r — skipping opp lookup", acct_id)
+            return {"status": "no_open_opps", "message": "Couldn't resolve a valid Account ID."}
 
         escaped_id = acct_id.replace("'", "\\'")
         query = (
@@ -561,7 +619,7 @@ def log_touch(
 
     task_id: str = task_result["id"]
 
-    # 6. Audit.
+    # 6. Audit (include notes + when so the trail is self-contained).
     try:
         audit.record_write(
             {
@@ -572,6 +630,8 @@ def log_touch(
                 "opp_name": opp_name,
                 "task_id": task_id,
                 "subject": subject,
+                "notes": notes or "",
+                "when": activity_date.isoformat() if hasattr(activity_date, "isoformat") else str(activity_date),
             }
         )
     except Exception:

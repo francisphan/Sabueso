@@ -416,15 +416,31 @@ def _extract_text(response: anthropic.types.Message) -> str:
     return "\n".join(parts).strip() or "I couldn't find anything to report."
 
 
+def _escape_mrkdwn(s: str) -> str:
+    """Defang Slack mrkdwn meta-characters in LLM/rep-controlled text.
+
+    Escaping `<` blocks: channel pings (`<!here>`, `<!channel>`, `<!everyone>`),
+    user pings (`<@U123>`), and link spoofing (`<http://evil|Salesforce>`).
+    The `&` escape keeps `<` rendering as the literal `<` glyph (`&lt;`).
+    """
+    if not isinstance(s, str):
+        return ""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _summarize_pending(tool_name: str, arguments: dict) -> str:
-    """Render a Slack mrkdwn summary of a pending write for the confirmation card."""
+    """Render a Slack mrkdwn summary of a pending write for the confirmation card.
+
+    LLM/rep-controlled fields are passed through _escape_mrkdwn so a crafted
+    `notes` value (e.g. `<!channel>`) can't ping the whole channel.
+    """
     if tool_name == "sf_create_opportunity_for_person":
-        person = arguments.get("person_hint", "?")
-        product = arguments.get("product", "?")
-        notes = arguments.get("notes", "")
-        lead_source = arguments.get("lead_source", "")
+        person = _escape_mrkdwn(arguments.get("person_hint", "?"))
+        product = _escape_mrkdwn(arguments.get("product", "?"))  # enum-validated, but escape anyway
+        notes = _escape_mrkdwn(arguments.get("notes", ""))
+        lead_source = _escape_mrkdwn(arguments.get("lead_source", ""))
         touches = arguments.get("touches") or []
-        touch_str = ", ".join(t.get("subject", "?") for t in touches) if touches else "none"
+        touch_str = ", ".join(_escape_mrkdwn(t.get("subject", "?")) for t in touches) if touches else "none"
         lines = [
             f"*Create opportunity:* `{product}` for *{person}*",
             f"• Touches: {touch_str}",
@@ -436,10 +452,10 @@ def _summarize_pending(tool_name: str, arguments: dict) -> str:
         return "\n".join(lines)
 
     if tool_name == "sf_log_touch":
-        target = arguments.get("opp_hint") or arguments.get("person_hint") or "?"
-        subject = arguments.get("subject", "?")
-        notes = arguments.get("notes", "")
-        when = arguments.get("when", "today")
+        target = _escape_mrkdwn(arguments.get("opp_hint") or arguments.get("person_hint") or "?")
+        subject = _escape_mrkdwn(arguments.get("subject", "?"))
+        notes = _escape_mrkdwn(arguments.get("notes", ""))
+        when = _escape_mrkdwn(arguments.get("when", "today"))
         lines = [
             f"*Log touch* on opportunity for *{target}*",
             f"• Subject: {subject}",
@@ -449,8 +465,8 @@ def _summarize_pending(tool_name: str, arguments: dict) -> str:
             lines.append(f"• Notes: {notes}")
         return "\n".join(lines)
 
-    # Fallback for any future write tool — just dump the args.
-    return f"Execute `{tool_name}` with `{json.dumps(arguments, default=str)[:300]}`"
+    # Fallback for any future write tool — dump escaped args.
+    return f"Execute `{tool_name}` with `{_escape_mrkdwn(json.dumps(arguments, default=str)[:300])}`"
 
 
 # ---------------------------------------------------------------------------

@@ -220,6 +220,33 @@ def execute_pending(action_id: str, body: dict, client: "WebClient") -> None:
     message_ts = body["message"]["ts"]
     clicker = body["user"]["id"]
 
+    # Re-check permissions at execute time: an admin may have demoted the
+    # requester between card-post and click. peek so we can leave the op
+    # alone if denial happens — pop only after authorization confirmed.
+    op_preview = pending_ops.peek(action_id)
+    if op_preview is not None and not can_use_tool(op_preview.requester_user_id, op_preview.tool_name):
+        try:
+            client.chat_postEphemeral(
+                channel=channel,
+                user=clicker,
+                text=(
+                    f"Permission revoked for `{op_preview.tool_name}` — this action cannot be confirmed."
+                ),
+            )
+            client.chat_update(
+                channel=channel,
+                ts=message_ts,
+                text="_Permission revoked. Cancelled._",
+                blocks=[
+                    {"type": "section", "text": {"type": "mrkdwn", "text": "_Permission revoked. Cancelled._"}},
+                ],
+            )
+        except Exception:
+            log.exception("Failed to notify permission revoke")
+        # Drop the op so the card can't be reused.
+        pending_ops.pop(action_id)
+        return
+
     op, err = pending_ops.pop_if_authorized(action_id, clicker)
     if err == "expired":
         try:
@@ -257,16 +284,25 @@ def execute_pending(action_id: str, body: dict, client: "WebClient") -> None:
             "logged for investigation."
         )
 
-    # Replace the card with a "confirmed" marker so the buttons are gone.
+    # Replace the card with a status that reflects what actually happened.
+    # An exception clearly failed; a non-ok status result (needs_person_details,
+    # ambiguous_*, create_failed, etc.) is also a failure from the rep's POV.
+    succeeded = error_type is None and result_text.startswith("✅")
+    if succeeded:
+        card_text = f"✓ Confirmed: {op.summary}"
+        card_section = f"✓ *Confirmed*\n{op.summary}"
+    else:
+        card_text = f"⚠️ Failed: {op.summary}"
+        card_section = f"⚠️ *Failed*\n{op.summary}"
     try:
         client.chat_update(
             channel=channel,
             ts=message_ts,
-            text=f"✓ Confirmed: {op.summary}",
+            text=card_text,
             blocks=[
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"✓ *Confirmed*\n{op.summary}"},
+                    "text": {"type": "mrkdwn", "text": card_section},
                 },
             ],
         )

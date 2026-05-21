@@ -110,6 +110,12 @@ def _load_acl() -> dict[str, AclEntry]:
         except json.JSONDecodeError:
             log.warning("Corrupt ACL file at %s — falling back to defaults", _ACL_PATH)
             return {_DEFAULT_ADMIN: AclEntry(role=Role.ADMIN)}
+        if not isinstance(raw, dict):
+            log.warning(
+                "ACL file at %s has wrong shape (got %s, expected object) — falling back to defaults",
+                _ACL_PATH, type(raw).__name__,
+            )
+            return {_DEFAULT_ADMIN: AclEntry(role=Role.ADMIN)}
         entries: dict[str, AclEntry] = {}
         for uid, value in raw.items():
             parsed = _parse_entry(value)
@@ -128,9 +134,16 @@ def _load_acl() -> dict[str, AclEntry]:
 
 
 def _save_acl(acl: dict[str, AclEntry]) -> None:
+    """Atomic write: serialize to a sibling temp file then rename into place.
+
+    Prevents a mid-write crash from leaving the ACL truncated or corrupt
+    (which would silently revoke every non-bootstrap user on next start).
+    """
     _ACL_PATH.parent.mkdir(parents=True, exist_ok=True)
     serialized = {uid: _serialize_entry(entry) for uid, entry in acl.items()}
-    _ACL_PATH.write_text(json.dumps(serialized, indent=2))
+    tmp = _ACL_PATH.with_suffix(_ACL_PATH.suffix + ".tmp")
+    tmp.write_text(json.dumps(serialized, indent=2))
+    tmp.replace(_ACL_PATH)
     log.info("ACL saved to %s", _ACL_PATH)
 
 
