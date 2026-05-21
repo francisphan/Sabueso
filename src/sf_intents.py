@@ -134,6 +134,83 @@ def _is_sf_id(s: str) -> bool:
     return bool(s and re.fullmatch(r"[A-Za-z0-9]{15}|[A-Za-z0-9]{18}", s))
 
 
+_EMAIL_RE = re.compile(r"[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+")
+
+
+def _soql_lookup_by_email(email: str) -> list[dict]:
+    """Direct SOQL lookup by email — bypasses SOSL's fuzzy tokenization
+    when the rep has given us an exact email. Returns candidate dicts
+    in the same shape as _sosl_search_person.
+    """
+    escaped = email.replace("\\", "\\\\").replace("'", "\\'")
+    candidates: list[dict] = []
+    seen_account_ids: set[str] = set()
+
+    # Person Account by PersonEmail.
+    try:
+        accounts = call_tool(
+            "sf_soql_query",
+            {
+                "query_str": (
+                    f"SELECT Id, Name, PersonEmail, IsPersonAccount "
+                    f"FROM Account WHERE PersonEmail = '{escaped}' "
+                    f"AND IsPersonAccount = true LIMIT 5"
+                )
+            },
+        )
+        for rec in _records(accounts):
+            acct_id = rec.get("Id")
+            if not acct_id or acct_id in seen_account_ids:
+                continue
+            seen_account_ids.add(acct_id)
+            candidates.append(
+                {
+                    "name": rec.get("Name", ""),
+                    "email": rec.get("PersonEmail", ""),
+                    "account_id": acct_id,
+                    "source": "PersonAccount",
+                }
+            )
+    except Exception:
+        log.exception("SOQL Account-by-email lookup failed for %s", email)
+
+    # Contact by Email (skip if their Account is already in the list).
+    try:
+        contacts = call_tool(
+            "sf_soql_query",
+            {
+                "query_str": (
+                    f"SELECT Id, FirstName, LastName, Email, AccountId, Account.Name "
+                    f"FROM Contact WHERE Email = '{escaped}' LIMIT 5"
+                )
+            },
+        )
+        for rec in _records(contacts):
+            acct_id = rec.get("AccountId")
+            if acct_id and acct_id in seen_account_ids:
+                continue
+            if acct_id:
+                seen_account_ids.add(acct_id)
+            acct_obj = rec.get("Account") or {}
+            name = (
+                acct_obj.get("Name")
+                or f"{rec.get('FirstName') or ''} {rec.get('LastName') or ''}".strip()
+                or rec.get("Id", "")
+            )
+            candidates.append(
+                {
+                    "name": name,
+                    "email": rec.get("Email", ""),
+                    "account_id": acct_id,
+                    "source": "Contact",
+                }
+            )
+    except Exception:
+        log.exception("SOQL Contact-by-email lookup failed for %s", email)
+
+    return candidates
+
+
 def _sosl_search_person(hint: str) -> list[dict]:
     """Run a SOSL search and collapse results into a normalised candidate list.
 
@@ -141,7 +218,18 @@ def _sosl_search_person(hint: str) -> list[dict]:
         {name, email, account_id, source}
 
     Source is "PersonAccount", "Contact", or "Lead".
+
+    Fast-path: if *hint* contains an email, try a direct SOQL lookup by
+    Email / PersonEmail first. SOSL tokenizes on `.` and `@`, which fans
+    out into too many matches when the hint includes an email address.
     """
+    email_match = _EMAIL_RE.search(hint)
+    if email_match:
+        direct = _soql_lookup_by_email(email_match.group(0).lower())
+        if direct:
+            return direct
+        # No exact email match — fall through to SOSL (rep might have a typo).
+
     sanitized = _sanitize_sosl(hint)
     sosl = (
         f"FIND {{{sanitized}}} IN ALL FIELDS "
@@ -307,16 +395,10 @@ def create_opportunity_for_person(
     account_id = person.get("account_id")
     account_name = person["name"]
 
-    # 7. Resolve SF user identity.
+    # 7. Resolve SF user identity (optional). If no per-Slack-user mapping
+    #    exists, OwnerId is omitted and SF defaults to the API-connection's
+    #    authenticated user — fine when everyone shares one SF account.
     sf_user_id = sf_identity.get_sf_user_id_for_slack(slack_user_id, slack_client)
-    if not sf_user_id:
-        return {
-            "status": "no_sf_identity",
-            "message": (
-                "I can't find a Salesforce user matching your Slack email. "
-                "Ask an admin to run `!access map @you <sf_user_id>`."
-            ),
-        }
 
     # 8. Compute CloseDate.
     today = date.today()
@@ -335,9 +417,10 @@ def create_opportunity_for_person(
         "Name": f"{account_name} - {product}",
         "StageName": "Deep Discovery",
         "CloseDate": close_date.isoformat(),
-        "OwnerId": sf_user_id,
         "Description": description,
     }
+    if sf_user_id:
+        opp_data["OwnerId"] = sf_user_id
     if account_id:
         opp_data["AccountId"] = account_id
     if lead_source:
@@ -365,13 +448,14 @@ def create_opportunity_for_person(
 
         task_data: dict[str, Any] = {
             "WhatId": opp_id,
-            "OwnerId": sf_user_id,
             "Subject": subj,
             "Description": touch_notes,
             "ActivityDate": touch_when.isoformat(),
             "Status": "Completed",
             "Priority": "Normal",
         }
+        if sf_user_id:
+            task_data["OwnerId"] = sf_user_id
         try:
             task_result = call_tool("sf_create_record", {"object_name": "Task", "data": task_data})
             task_id = task_result.get("id") if isinstance(task_result, dict) else None
@@ -594,28 +678,22 @@ def log_touch(
             "message": "Please provide either an opportunity name/ID or a person's name.",
         }
 
-    # 3. Resolve SF user identity.
+    # 3. Resolve SF user identity (optional — see create_opportunity_for_person
+    #    for the same fallback rationale).
     sf_user_id = sf_identity.get_sf_user_id_for_slack(slack_user_id, slack_client)
-    if not sf_user_id:
-        return {
-            "status": "no_sf_identity",
-            "message": (
-                "I can't find a Salesforce user matching your Slack email. "
-                "Ask an admin to run `!access map @you <sf_user_id>`."
-            ),
-        }
 
     # 4. Build Task payload.
     activity_date = parse_when(when)
     task_data: dict[str, Any] = {
         "WhatId": opp_id,
-        "OwnerId": sf_user_id,
         "Subject": subject,
         "Description": notes,
         "ActivityDate": activity_date.isoformat(),
         "Status": "Completed",
         "Priority": "Normal",
     }
+    if sf_user_id:
+        task_data["OwnerId"] = sf_user_id
 
     # 5. Create Task.
     try:

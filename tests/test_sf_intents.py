@@ -493,8 +493,20 @@ class TestCreateOpportunityForPerson:
     # SF identity failure
     # -----------------------------------------------------------------------
 
-    def test_no_sf_identity(self, monkeypatch, mock_sf_identity_none):
-        monkeypatch.setattr(sf_intents, "call_tool", MagicMock(return_value=_sosl_one_person()))
+    def test_no_sf_identity_omits_owner_id(self, monkeypatch, mock_sf_identity_none):
+        """Missing Slack→SF user mapping is non-fatal — opp is created without
+        OwnerId so SF defaults to the API-connection's authenticated user."""
+        calls = []
+
+        def side_effect(tool, params):
+            calls.append((tool, params))
+            if tool == "sf_search":
+                return _sosl_one_person()
+            if tool == "sf_create_record":
+                return {"id": OPP_ID, "success": True}
+            return {}
+
+        monkeypatch.setattr(sf_intents, "call_tool", MagicMock(side_effect=side_effect))
 
         result = sf_intents.create_opportunity_for_person(
             slack_user_id=SLACK_USER_ID,
@@ -503,8 +515,13 @@ class TestCreateOpportunityForPerson:
             product=VALID_PRODUCT,
         )
 
-        assert result["status"] == "no_sf_identity"
-        assert "message" in result
+        assert result["status"] == "ok"
+        opp_create_call = next(
+            (params for tool, params in calls if tool == "sf_create_record" and params["object_name"] == "Opportunity"),
+            None,
+        )
+        assert opp_create_call is not None
+        assert "OwnerId" not in opp_create_call["data"]
 
     # -----------------------------------------------------------------------
     # Opportunity creation failures
@@ -996,12 +1013,17 @@ class TestLogTouch:
     # SF identity failure
     # -----------------------------------------------------------------------
 
-    def test_no_sf_identity_with_direct_opp_id(self, monkeypatch, mock_sf_identity_none):
-        """SF identity resolution fails → no_sf_identity, even if opp is known."""
+    def test_no_sf_identity_with_direct_opp_id_omits_owner(self, monkeypatch, mock_sf_identity_none):
+        """Missing Slack→SF mapping is non-fatal: log_touch still writes the
+        Task, with OwnerId omitted so SF defaults to the API user."""
         opp_id_hint = "006" + "A" * 15
-        monkeypatch.setattr(
-            sf_intents, "call_tool", MagicMock(return_value={"id": TASK_ID_1, "success": True})
-        )
+        calls = []
+
+        def side_effect(tool, params):
+            calls.append((tool, params))
+            return {"id": TASK_ID_1, "success": True}
+
+        monkeypatch.setattr(sf_intents, "call_tool", MagicMock(side_effect=side_effect))
 
         result = sf_intents.log_touch(
             slack_user_id=SLACK_USER_ID,
@@ -1010,10 +1032,19 @@ class TestLogTouch:
             subject=VALID_SUBJECT,
         )
 
-        assert result["status"] == "no_sf_identity"
+        assert result["status"] == "ok"
+        task_create = next(
+            (params for tool, params in calls if tool == "sf_create_record" and params["object_name"] == "Task"),
+            None,
+        )
+        assert task_create is not None
+        assert "OwnerId" not in task_create["data"]
 
-    def test_no_sf_identity_with_name_fragment(self, monkeypatch, mock_sf_identity_none):
+    def test_no_sf_identity_with_name_fragment_omits_owner(self, monkeypatch, mock_sf_identity_none):
+        calls = []
+
         def side_effect(tool, params):
+            calls.append((tool, params))
             if tool == "sf_soql_query":
                 return _soql_one_opp()
             return {"id": TASK_ID_1, "success": True}
@@ -1027,7 +1058,13 @@ class TestLogTouch:
             subject=VALID_SUBJECT,
         )
 
-        assert result["status"] == "no_sf_identity"
+        assert result["status"] == "ok"
+        task_create = next(
+            (params for tool, params in calls if tool == "sf_create_record" and params["object_name"] == "Task"),
+            None,
+        )
+        assert task_create is not None
+        assert "OwnerId" not in task_create["data"]
 
     # -----------------------------------------------------------------------
     # Task creation failure
