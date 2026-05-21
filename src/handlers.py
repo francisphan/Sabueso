@@ -271,6 +271,24 @@ def execute_pending(action_id: str, body: dict, client: "WebClient") -> None:
         return
     assert op is not None  # narrowed by err check
 
+    # Flip the card to a "working" state IMMEDIATELY so the buttons vanish
+    # before SF round-trips complete (2-3 sec). Prevents double-confirm and
+    # gives the rep visual acknowledgement that their click registered.
+    try:
+        client.chat_update(
+            channel=channel,
+            ts=message_ts,
+            text=f"⏳ Working on it: {op.summary}",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"⏳ *Working on it…*\n{op.summary}"},
+                },
+            ],
+        )
+    except Exception:
+        log.exception("Failed to show working state — proceeding")
+
     started = time.monotonic()
     error_type: str | None = None
     result_text = ""
