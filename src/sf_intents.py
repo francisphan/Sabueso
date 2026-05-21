@@ -152,11 +152,22 @@ def _sosl_search_person(hint: str) -> list[dict]:
     )
     result = call_tool("sf_search", {"sosl_query": sosl})
 
-    # Normalise envelope: sf_search returns {"searchRecords": [...]} or a list.
+    # Normalise envelope. sf_search via MCP can come back as:
+    #   - list[dict]                       — the normal multi-record case
+    #   - dict with searchRecords/records  — some MCP server flavors wrap it
+    #   - bare dict that IS the record     — single-record case after our
+    #                                        _decode_concatenated_json path
+    #   - dict with "error"                — server-side failure
     if isinstance(result, list):
         records = result
     elif isinstance(result, dict):
-        records = result.get("searchRecords", result.get("records", []))
+        if "searchRecords" in result or "records" in result:
+            records = result.get("searchRecords", result.get("records", []))
+        elif "Id" in result or "attributes" in result:
+            # A single record returned as a bare dict.
+            records = [result]
+        else:
+            records = []
     else:
         records = []
 

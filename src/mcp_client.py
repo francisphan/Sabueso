@@ -190,7 +190,8 @@ def _extract_content(result: dict):
 
     MCP tools may return:
     - A single JSON object/array as text
-    - Multiple JSON objects concatenated (e.g. one per record)
+    - Multiple JSON objects concatenated (one per record), each possibly
+      pretty-printed across multiple lines
     - Plain text
     """
     content = result.get("content", [])
@@ -203,27 +204,37 @@ def _extract_content(result: dict):
 
     combined = "\n".join(texts)
 
-    # Try parsing as a single JSON value first
+    # Try parsing as a single JSON value first.
     try:
         return json.loads(combined)
     except json.JSONDecodeError:
         pass
 
-    # Try parsing as multiple concatenated JSON objects (one per line/block)
-    objects = []
-    for chunk in combined.split("\n"):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        if chunk.startswith("{") or chunk.startswith("["):
-            try:
-                objects.append(json.loads(chunk))
-                continue
-            except json.JSONDecodeError:
-                pass
-        # If we already collected some objects, this chunk might be part
-        # of a multi-line JSON block — fall through to raw return
-        if not objects:
-            return combined
+    # Multi-record case: scan the combined text with raw_decode so we can
+    # peel off one JSON value at a time even when each is pretty-printed
+    # across many lines (which a naive split("\n") can't handle).
+    objects = _decode_concatenated_json(combined)
+    if len(objects) > 1:
+        return objects
+    if len(objects) == 1:
+        return objects[0]
+    return combined
 
-    return objects if objects else combined
+
+def _decode_concatenated_json(s: str) -> list:
+    """Return all top-level JSON values found in *s*, in order.
+
+    Stops at the first thing that doesn't decode — returns whatever it
+    collected up to that point.
+    """
+    decoder = json.JSONDecoder()
+    s = s.strip()
+    objects: list = []
+    while s:
+        try:
+            value, end = decoder.raw_decode(s)
+        except json.JSONDecodeError:
+            break
+        objects.append(value)
+        s = s[end:].lstrip()
+    return objects
