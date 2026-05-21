@@ -25,13 +25,126 @@ WRITE_OPERATIONS: frozenset[str] = frozenset(
         "pardot_update_prospect",
         "pardot_delete_prospect",
         "pardot_upsert_prospect",
+        # Sabueso-local intent tools (run via sf_intents, not MCP)
+        "sf_create_opportunity_for_person",
+        "sf_log_touch",
     }
+)
+
+# ---------------------------------------------------------------------------
+# Intent tools — Sabueso-local Python functions that the dispatcher routes
+# to sf_intents instead of mcp_client.call_tool. Maps tool_name -> sf_intents
+# function name. These all live in WRITE_OPERATIONS.
+# ---------------------------------------------------------------------------
+INTENT_TOOLS: dict[str, str] = {
+    "sf_create_opportunity_for_person": "create_opportunity_for_person",
+    "sf_log_touch": "log_touch",
+}
+
+# Allowed values shared with the tool schemas below and the sf_intents module.
+OPPORTUNITY_PRODUCTS: tuple[str, ...] = (
+    "TVOM Vineyards",
+    "TVOM Housing Lot",
+    "TVOM Villa Expansion",
+    "TVG Membership",
+)
+
+TOUCH_SUBJECTS: tuple[str, ...] = (
+    "Call",
+    "Conversation",
+    "Meetings",
+    "Text Message",
+    "Voice Mail",
+    "Vineyard Visit",
+    "Other",
 )
 
 # ---------------------------------------------------------------------------
 # Claude API tool definitions
 # ---------------------------------------------------------------------------
 TOOLS: list[dict] = [
+    # ── Sales-rep write intents ─────────────────────────────────────────
+    {
+        "name": "sf_create_opportunity_for_person",
+        "description": (
+            "Create a new Salesforce Opportunity for a person identified by "
+            "name or email. The requesting Slack user is set as the Owner. "
+            "Use when a sales rep describes a new prospect they want to track. "
+            "Optionally logs touches (Tasks) for interactions already had."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "person_hint": {
+                    "type": "string",
+                    "description": "Person's name and/or email — used as a SOSL search hint.",
+                },
+                "product": {
+                    "type": "string",
+                    "enum": list(OPPORTUNITY_PRODUCTS),
+                    "description": "Map the rep's words: vineyard -> TVOM Vineyards, housing lot/build a home -> TVOM Housing Lot, villa expansion -> TVOM Villa Expansion, membership/TVG -> TVG Membership.",
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Free-text context to put in the Opportunity Description.",
+                },
+                "lead_source": {
+                    "type": "string",
+                    "description": "Where the lead came from (referral, stayed at TVRS, etc.). Only include if the rep specified — do not invent.",
+                },
+                "touches": {
+                    "type": "array",
+                    "description": "Touches already had with the person (to be logged as Tasks).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subject": {
+                                "type": "string",
+                                "enum": list(TOUCH_SUBJECTS),
+                            },
+                            "notes": {"type": "string"},
+                            "when": {
+                                "type": "string",
+                                "description": "ISO date or 'today'. Defaults to today.",
+                            },
+                        },
+                        "required": ["subject"],
+                    },
+                },
+            },
+            "required": ["person_hint", "product"],
+        },
+    },
+    {
+        "name": "sf_log_touch",
+        "description": (
+            "Log a touch (Task) on an existing open Salesforce Opportunity for "
+            "a person. Use for follow-up interactions ('talked to John again')."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "opp_hint": {
+                    "type": "string",
+                    "description": "Opportunity SF ID or name fragment, if known.",
+                },
+                "person_hint": {
+                    "type": "string",
+                    "description": "Person's name and/or email — used when opp_hint not given.",
+                },
+                "subject": {
+                    "type": "string",
+                    "enum": list(TOUCH_SUBJECTS),
+                },
+                "notes": {"type": "string"},
+                "when": {
+                    "type": "string",
+                    "description": "ISO date or 'today'. Defaults to today.",
+                },
+            },
+            "required": ["subject"],
+        },
+    },
     # ── Person/guest lookup ─────────────────────────────────────────────
     {
         "name": "sf_find_by_email",

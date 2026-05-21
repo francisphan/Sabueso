@@ -20,9 +20,18 @@ from typing import Any, Callable
 
 import anthropic
 
-from tools_catalog import TOOLS, WRITE_OPERATIONS
+from tools_catalog import TOOLS, WRITE_OPERATIONS, OPPORTUNITY_PRODUCTS, TOUCH_SUBJECTS
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class PendingConfirmation:
+    """A write tool the agent wants to run, pending user confirmation."""
+
+    tool_name: str
+    arguments: dict
+    summary: str  # Slack mrkdwn, rendered into the Block Kit card
 
 
 @dataclass
@@ -39,6 +48,9 @@ class AgentResult:
     max_steps_hit: bool = False
     blocked_writes: int = 0
     error_type: str | None = None
+    # Set when the loop halted on a write tool; handlers turns this into a
+    # registered pending_op and posts a confirmation card instead of `text`.
+    pending_confirmation: PendingConfirmation | None = None
 
 MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = 4096
@@ -109,6 +121,39 @@ If you have an EMAIL:
 
 Only query TVRS_Guest__c directly when the user specifically asks about
 reservations, check-ins, villas, or stay history.
+
+## Sales-rep mode (write operations)
+When a sales rep describes a new prospect interaction, your job is to either:
+  (a) create a new opportunity → sf_create_opportunity_for_person, or
+  (b) log a touch on an existing opportunity → sf_log_touch.
+
+Decide based on whether the rep treats this as a fresh prospect ("just met
+them at the pool") versus a follow-up ("talked to them again, here are notes").
+
+Map casual language to the product enum:
+  "vineyard / private vineyard / lot"            -> TVOM Vineyards
+  "housing lot / 6 acres / build a home / land"  -> TVOM Housing Lot
+  "villa expansion / second villa / expand"      -> TVOM Villa Expansion
+  "membership / TVG / join the club"             -> TVG Membership
+
+Map casual language to a touch subject:
+  phone call / called / rang        -> Call
+  in-person / casual / passerby     -> Conversation
+  meeting / lunch / sit-down        -> Meetings
+  text / WhatsApp / SMS             -> Text Message
+  voicemail / left a message / LM   -> Voice Mail
+  vineyard tour / walked the lot    -> Vineyard Visit
+
+If a tool returns status "needs_person_details" or "ambiguous_person", surface
+the result message to the rep verbatim — DO NOT guess which person they meant.
+Same for "ambiguous_opp" on sf_log_touch.
+
+Pass lead_source ONLY if the rep mentions where the lead came from (referral,
+stayed at TVRS, friend, etc.). Don't invent it.
+
+Writes never execute directly: when you call one of these tools, the bot
+posts a confirmation card with Confirm/Cancel buttons to the rep. Do not
+chain additional tool calls after a write — the loop halts at the write.
 
 ## Salesforce schema (use these exact field names in SOQL)
 
@@ -303,29 +348,37 @@ def run_agent(
             log.info("=== AGENT DONE (no tools) === steps=%d final_len=%d", result.steps, len(result.text))
             return result
 
+        # Halt the loop if any tool in this batch is a write — surface as a
+        # pending confirmation. The action handler executes the write after
+        # the rep taps Confirm. We take the first write in the batch; mixed
+        # read+write batches are pathological and just log a warning.
+        write_call = next((b for b in tool_calls if b.name in WRITE_OPERATIONS), None)
+        if write_call is not None:
+            if len(tool_calls) > 1:
+                log.warning(
+                    "  Mixed batch with %d tool_calls including write %s — halting on the write",
+                    len(tool_calls), write_call.name,
+                )
+            arguments = write_call.input or {}
+            result.tool_calls.append(write_call.name)
+            result.blocked_writes += 1
+            result.pending_confirmation = PendingConfirmation(
+                tool_name=write_call.name,
+                arguments=arguments,
+                summary=_summarize_pending(write_call.name, arguments),
+            )
+            log.info("=== AGENT HALTED ON WRITE === tool=%s steps=%d", write_call.name, result.steps)
+            return result
+
         messages.append({"role": "assistant", "content": response.content})
 
         tool_results = []
         for tool_call in tool_calls:
             tool_name = tool_call.name
             arguments = tool_call.input or {}
-            is_write = tool_name in WRITE_OPERATIONS
             result.tool_calls.append(tool_name)
 
-            log.info("  Executing tool: %s(%s) write=%s", tool_name, json.dumps(arguments, default=str), is_write)
-
-            if is_write:
-                result.blocked_writes += 1
-                log.info("  BLOCKED — write operation requires confirmation")
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_call.id,
-                    "content": json.dumps({
-                        "error": "Write operations require confirmation. "
-                                 "Please confirm you want to proceed."
-                    }),
-                })
-                continue
+            log.info("  Executing tool: %s(%s)", tool_name, json.dumps(arguments, default=str))
 
             try:
                 tool_output = tool_executor(tool_name, arguments)
@@ -361,6 +414,59 @@ def _extract_text(response: anthropic.types.Message) -> str:
     """Extract text content from a Claude response."""
     parts = [b.text for b in response.content if b.type == "text"]
     return "\n".join(parts).strip() or "I couldn't find anything to report."
+
+
+def _escape_mrkdwn(s: str) -> str:
+    """Defang Slack mrkdwn meta-characters in LLM/rep-controlled text.
+
+    Escaping `<` blocks: channel pings (`<!here>`, `<!channel>`, `<!everyone>`),
+    user pings (`<@U123>`), and link spoofing (`<http://evil|Salesforce>`).
+    The `&` escape keeps `<` rendering as the literal `<` glyph (`&lt;`).
+    """
+    if not isinstance(s, str):
+        return ""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _summarize_pending(tool_name: str, arguments: dict) -> str:
+    """Render a Slack mrkdwn summary of a pending write for the confirmation card.
+
+    LLM/rep-controlled fields are passed through _escape_mrkdwn so a crafted
+    `notes` value (e.g. `<!channel>`) can't ping the whole channel.
+    """
+    if tool_name == "sf_create_opportunity_for_person":
+        person = _escape_mrkdwn(arguments.get("person_hint", "?"))
+        product = _escape_mrkdwn(arguments.get("product", "?"))  # enum-validated, but escape anyway
+        notes = _escape_mrkdwn(arguments.get("notes", ""))
+        lead_source = _escape_mrkdwn(arguments.get("lead_source", ""))
+        touches = arguments.get("touches") or []
+        touch_str = ", ".join(_escape_mrkdwn(t.get("subject", "?")) for t in touches) if touches else "none"
+        lines = [
+            f"*Create opportunity:* `{product}` for *{person}*",
+            f"• Touches: {touch_str}",
+        ]
+        if lead_source:
+            lines.append(f"• Lead source: {lead_source}")
+        if notes:
+            lines.append(f"• Notes: {notes}")
+        return "\n".join(lines)
+
+    if tool_name == "sf_log_touch":
+        target = _escape_mrkdwn(arguments.get("opp_hint") or arguments.get("person_hint") or "?")
+        subject = _escape_mrkdwn(arguments.get("subject", "?"))
+        notes = _escape_mrkdwn(arguments.get("notes", ""))
+        when = _escape_mrkdwn(arguments.get("when", "today"))
+        lines = [
+            f"*Log touch* on opportunity for *{target}*",
+            f"• Subject: {subject}",
+            f"• When: {when}",
+        ]
+        if notes:
+            lines.append(f"• Notes: {notes}")
+        return "\n".join(lines)
+
+    # Fallback for any future write tool — dump escaped args.
+    return f"Execute `{tool_name}` with `{_escape_mrkdwn(json.dumps(arguments, default=str)[:300])}`"
 
 
 # ---------------------------------------------------------------------------
