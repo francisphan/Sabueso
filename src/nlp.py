@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import anthropic
@@ -22,6 +23,22 @@ import anthropic
 from tools_catalog import TOOLS, WRITE_OPERATIONS
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class AgentResult:
+    """Outcome of a single agentic run — text plus per-turn telemetry."""
+
+    text: str
+    steps: int = 0
+    tool_calls: list[str] = field(default_factory=list)
+    input_tokens: int = 0           # uncached portion only
+    output_tokens: int = 0
+    cache_read_tokens: int = 0      # served from prompt cache
+    cache_creation_tokens: int = 0  # written to prompt cache (~1.25x cost)
+    max_steps_hit: bool = False
+    blocked_writes: int = 0
+    error_type: str | None = None
 
 MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = 4096
@@ -48,20 +65,41 @@ user a complete answer.
 - If the data is empty, say so clearly.
 - Never fabricate data — only use what is provided.
 
+## System ownership (use this to pick where to look)
+- **Salesforce** = identity & relationship. Who someone is, who owns them,
+  reservations (TVRS_Guest__c), open opportunities. Default for "tell me about X".
+- **NetSuite** = money & inventory. Invoices, sales orders, payments, balances,
+  items purchased, vineyard/owner custom fields. Go here for financial questions.
+- **Pardot** = marketing engagement. Form fills, email opens, list memberships,
+  visitor activity. Go here for "did they engage with campaign X".
+
 ## Tool selection
 - For a "360 profile" or "full guest profile", use guest_360_profile.
 - For a quick cross-system lookup by email, use lookup_guest_by_email.
 - For invoices, sales orders, or financial records → NetSuite (ns_suiteql_query).
 - For contacts, accounts, opportunities, guest reservations → Salesforce (sf_soql_query).
 - For prospects, marketing lists, or visitor activity → Pardot tools.
-- If the request is ambiguous, ask for clarification instead of calling a tool.
+- If the request is genuinely ambiguous (which person? which system?), ask.
+  Otherwise take a reasonable first attempt — a partial answer beats a refusal.
 - For follow-ups, use conversation history context.
 - When you need full details on a NetSuite record, use ns_rest_get with the
   record type and ID — this returns ALL fields including custom ones.
 
 ## Guest lookup strategy (IMPORTANT)
 When looking up a person/guest, the starting point is ALWAYS Contact or Account
-(Person Account), NOT TVRS_Guest__c. The typical approach:
+(Person Account), NOT TVRS_Guest__c.
+
+If you only have a NAME (no email):
+- Use sf_search (SOSL) — it scans Contact, Account, Lead, and TVRS_Guest__c
+  in one call and catches Person Accounts (whose name lives on Account.Name,
+  NOT on Contact.FirstName/LastName — a SOQL on Contact will miss them).
+- Example: sf_search(search_str="FIND {Andrew Caplan} IN ALL FIELDS RETURNING
+    Contact(Id, FirstName, LastName, Email, AccountId),
+    Account(Id, Name, PersonEmail, IsPersonAccount, Description),
+    Lead(Id, FirstName, LastName, Email, Company)")
+- Then fan out to Account/Opportunity/TVRS_Guest__c as needed.
+
+If you have an EMAIL:
 1. Find the Contact by email: SELECT Id, FirstName, LastName, Email, AccountId
    FROM Contact WHERE Email = '...'
 2. Get the Account details: SELECT Id, Name, PersonEmail, PersonTitle, Website,
@@ -87,6 +125,9 @@ TVRS_Guest__c (guest reservations):
 Account (Person Accounts — IsPersonAccount = true):
   Id, Name, PersonEmail, PersonTitle, Website, Description, IsPersonAccount,
   Primary_Language__pc, OwnerId, CreatedDate, LastModifiedDate
+  IMPORTANT: For Person Accounts the full name lives on `Name` (e.g.
+  "Andrew Caplan"), NOT on FirstName/LastName. Searching Contact by name
+  will MISS people who only exist as a Person Account — use sf_search instead.
   Example: SELECT Id, Name, PersonEmail, Description FROM Account
     WHERE IsPersonAccount = true LIMIT 10
 
@@ -191,23 +232,8 @@ def run_agent(
     message: str,
     tool_executor: Callable[[str, dict], Any],
     conversation_history: list[dict[str, Any]] | None = None,
-) -> str:
-    """Run the agentic tool-use loop and return the final text response.
-
-    Parameters
-    ----------
-    message:
-        The user's natural-language message.
-    tool_executor:
-        A callable(tool_name, arguments) -> result that executes MCP tools.
-    conversation_history:
-        Optional prior messages for multi-turn context.
-
-    Returns
-    -------
-    str
-        The final Slack-formatted response text.
-    """
+) -> AgentResult:
+    """Run the agentic tool-use loop and return the final response + telemetry."""
     client = _get_client()
 
     messages: list[dict[str, Any]] = []
@@ -215,57 +241,81 @@ def run_agent(
         messages.extend(conversation_history)
     messages.append({"role": "user", "content": message})
 
+    result = AgentResult(text="")
+
+    # Cache the system prompt; tools render before system, so this also
+    # caches the (much larger) TOOLS array across every step of the loop
+    # and across subsequent turns within the 5-minute ephemeral TTL.
+    cached_system = [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
     log.info("=== AGENT START === user_message=%r history_len=%d", message, len(messages) - 1)
 
+    response = None
     for step in range(MAX_STEPS):
+        result.steps = step + 1
         try:
             log.info("--- Step %d: sending %d messages to Claude (%s) ---", step, len(messages), MODEL)
             response = client.messages.create(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
-                system=SYSTEM_PROMPT,
+                system=cached_system,
                 tools=TOOLS,
                 messages=messages,
             )
         except anthropic.APIError as exc:
             log.exception("Claude API error at step %d", step)
-            return f"Sorry, I hit a snag: `{exc}`"
+            result.error_type = type(exc).__name__
+            result.text = f"Sorry, I hit a snag: `{exc}`"
+            return result
 
-        # Log all content blocks
+        usage = response.usage
+        result.input_tokens += usage.input_tokens
+        result.output_tokens += usage.output_tokens
+        result.cache_read_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
+        result.cache_creation_tokens += getattr(usage, "cache_creation_input_tokens", 0) or 0
+
         for i, block in enumerate(response.content):
             if block.type == "text":
                 log.info("  Step %d block[%d] TEXT: %s", step, i, block.text[:1000])
             elif block.type == "tool_use":
                 log.info("  Step %d block[%d] TOOL_USE: %s(%s)", step, i, block.name, json.dumps(block.input, default=str)[:500])
-        log.info("  Step %d stop_reason=%s usage=%s", step, response.stop_reason,
-                 {"input": response.usage.input_tokens, "output": response.usage.output_tokens})
+        log.info("  Step %d stop_reason=%s usage=%s", step, response.stop_reason, {
+            "input": usage.input_tokens,
+            "output": usage.output_tokens,
+            "cache_read": getattr(usage, "cache_read_input_tokens", 0),
+            "cache_write": getattr(usage, "cache_creation_input_tokens", 0),
+        })
 
-        # If Claude is done (no more tool calls), extract the final text
-        if response.stop_reason == "end_of_turn":
-            final = _extract_text(response)
-            log.info("=== AGENT DONE === steps=%d final_len=%d", step + 1, len(final))
-            return final
+        if response.stop_reason == "end_turn":
+            result.text = _extract_text(response)
+            log.info("=== AGENT DONE === steps=%d final_len=%d", result.steps, len(result.text))
+            return result
 
-        # Process tool calls
         tool_calls = [b for b in response.content if b.type == "tool_use"]
         if not tool_calls:
-            final = _extract_text(response)
-            log.info("=== AGENT DONE (no tools) === steps=%d final_len=%d", step + 1, len(final))
-            return final
+            result.text = _extract_text(response)
+            log.info("=== AGENT DONE (no tools) === steps=%d final_len=%d", result.steps, len(result.text))
+            return result
 
-        # Add assistant message with all content blocks
         messages.append({"role": "assistant", "content": response.content})
 
-        # Execute each tool call and collect results
         tool_results = []
         for tool_call in tool_calls:
             tool_name = tool_call.name
             arguments = tool_call.input or {}
             is_write = tool_name in WRITE_OPERATIONS
+            result.tool_calls.append(tool_name)
 
             log.info("  Executing tool: %s(%s) write=%s", tool_name, json.dumps(arguments, default=str), is_write)
 
             if is_write:
+                result.blocked_writes += 1
                 log.info("  BLOCKED — write operation requires confirmation")
                 tool_results.append({
                     "type": "tool_result",
@@ -278,15 +328,13 @@ def run_agent(
                 continue
 
             try:
-                result = tool_executor(tool_name, arguments)
-                result_str = json.dumps(result, default=str)
+                tool_output = tool_executor(tool_name, arguments)
+                result_str = json.dumps(tool_output, default=str)
                 if len(result_str) > 80_000:
                     result_str = result_str[:80_000] + "\n... [truncated]"
                 log.info("  Tool %s returned %d chars: %.1000s", tool_name, len(result_str), result_str)
             except Exception as e:
                 log.error("  Tool %s FAILED: %s", tool_name, e, exc_info=True)
-                # Sanitize: only pass the exception type and a generic message
-                # to Claude — the full traceback stays in logs only.
                 err_type = type(e).__name__
                 result_str = json.dumps({
                     "error": f"Tool {tool_name} failed ({err_type}). "
@@ -301,9 +349,12 @@ def run_agent(
 
         messages.append({"role": "user", "content": tool_results})
 
-    # Hit the step limit
+    result.max_steps_hit = True
     log.warning("=== AGENT HIT MAX STEPS (%d) ===", MAX_STEPS)
-    return _extract_text(response) or "I got a bit lost sniffing around. Could you try a simpler question?"
+    result.text = (
+        _extract_text(response) if response is not None else ""
+    ) or "I got a bit lost sniffing around. Could you try a simpler question?"
+    return result
 
 
 def _extract_text(response: anthropic.types.Message) -> str:
