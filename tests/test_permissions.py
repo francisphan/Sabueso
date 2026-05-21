@@ -11,18 +11,22 @@ import permissions
 from permissions import (
     Role,
     AclEntry,
+    add_role,
     add_user,
     bulk_add_users,
     can_use_tool,
     check_access,
     get_role,
+    get_roles,
     get_sf_user_override,
     is_admin,
     is_authorized,
     list_users,
     map_sf_user,
     parse_admin_command,
+    remove_role,
     remove_user,
+    set_user_roles,
     unmap_sf_user,
 )
 
@@ -524,3 +528,212 @@ class TestAclFile:
     def test_corrupt_file_uses_default_admin(self, isolated_acl):
         isolated_acl.write_text("not json {{{")
         assert is_admin(ADMIN_ID)
+
+
+# ── Multi-role users ──────────────────────────────────────────────────────
+
+MULTI_ID = "UMULTI"
+
+
+class TestMultiRoleParsing:
+    """ACL accepts bare-string, single-role object, and multi-role object."""
+
+    def test_bare_string_form(self, isolated_acl):
+        isolated_acl.write_text(json.dumps({"UA": "sales_rep"}))
+        assert get_roles("UA") == [Role.SALES_REP]
+
+    def test_singular_role_key(self, isolated_acl):
+        isolated_acl.write_text(json.dumps({"UA": {"role": "sales_rep"}}))
+        assert get_roles("UA") == [Role.SALES_REP]
+
+    def test_plural_roles_key(self, isolated_acl):
+        isolated_acl.write_text(
+            json.dumps({"UA": {"roles": ["sales_rep", "read_only"]}})
+        )
+        assert get_roles("UA") == [Role.SALES_REP, Role.READ_ONLY]
+
+    def test_dedupe_on_load(self, isolated_acl):
+        """Duplicate roles in the JSON collapse to a single entry."""
+        isolated_acl.write_text(
+            json.dumps({"UA": {"roles": ["sales_rep", "sales_rep", "read_only"]}})
+        )
+        assert get_roles("UA") == [Role.SALES_REP, Role.READ_ONLY]
+
+    def test_unknown_role_in_list_is_dropped(self, isolated_acl):
+        """An invalid role name in the middle of a list doesn't poison the rest."""
+        isolated_acl.write_text(
+            json.dumps({"UA": {"roles": ["sales_rep", "nonsense", "read_only"]}})
+        )
+        assert get_roles("UA") == [Role.SALES_REP, Role.READ_ONLY]
+
+    def test_get_role_returns_primary(self, isolated_acl):
+        """get_role (legacy) returns the first role."""
+        set_user_roles(MULTI_ID, [Role.SALES_REP, Role.READ_ONLY])
+        assert get_role(MULTI_ID) == Role.SALES_REP
+
+
+class TestMultiRoleSerialization:
+    """Round-trip: parse → serialize → parse preserves shape; compact form is preferred."""
+
+    def test_single_role_no_overrides_compacts(self, isolated_acl):
+        set_user_roles("UA", [Role.SALES_REP])
+        raw = json.loads(isolated_acl.read_text())
+        assert raw["UA"] == "sales_rep"
+
+    def test_single_role_with_override_uses_role_key(self, isolated_acl):
+        set_user_roles("UA", [Role.SALES_REP])
+        map_sf_user("UA", "00512345")
+        raw = json.loads(isolated_acl.read_text())
+        assert raw["UA"] == {"role": "sales_rep", "sf_user_id": "00512345"}
+
+    def test_multi_role_uses_roles_key(self, isolated_acl):
+        set_user_roles("UA", [Role.SALES_REP, Role.READ_ONLY])
+        raw = json.loads(isolated_acl.read_text())
+        assert raw["UA"] == {"roles": ["sales_rep", "read_only"]}
+
+    def test_round_trip(self, isolated_acl):
+        set_user_roles("UA", [Role.SALES_REP, Role.READ_ONLY])
+        # Force reload from disk.
+        assert get_roles("UA") == [Role.SALES_REP, Role.READ_ONLY]
+
+
+class TestMultiRoleCanUseTool:
+    """Effective scope is the union of every role's base scope."""
+
+    def test_union_of_role_scopes(self, isolated_acl, monkeypatch):
+        monkeypatch.setitem(
+            permissions.ROLE_TOOL_SCOPES, Role.READ_ONLY, {"some_read_tool"}
+        )
+        set_user_roles(MULTI_ID, [Role.SALES_REP, Role.READ_ONLY])
+        assert can_use_tool(MULTI_ID, "sf_create_opportunity_for_person")  # from sales_rep
+        assert can_use_tool(MULTI_ID, "some_read_tool")                    # from read_only
+
+    def test_admin_in_any_role_bypasses(self, isolated_acl):
+        """Admin role short-circuits even if other roles wouldn't permit the tool."""
+        set_user_roles(MULTI_ID, [Role.READ_ONLY, Role.ADMIN])
+        # Pick an arbitrary tool that's not in read_only's scope:
+        assert can_use_tool(MULTI_ID, "some_arbitrary_admin_only_tool")
+
+    def test_is_admin_true_if_any_role_is_admin(self, isolated_acl):
+        set_user_roles(MULTI_ID, [Role.SALES_REP, Role.ADMIN])
+        assert is_admin(MULTI_ID)
+
+    def test_is_admin_false_when_no_admin_role(self, isolated_acl):
+        set_user_roles(MULTI_ID, [Role.SALES_REP, Role.READ_ONLY])
+        assert not is_admin(MULTI_ID)
+
+    def test_extra_and_deny_still_apply(self, isolated_acl):
+        """Per-user overrides layer on top of the role union."""
+        # Build a multi-role entry with extra + deny manually.
+        isolated_acl.write_text(json.dumps({
+            MULTI_ID: {
+                "roles": ["sales_rep", "read_only"],
+                "extra": ["pardot_create_email"],
+                "deny": ["sf_create_opportunity_for_person"],
+            }
+        }))
+        # extra grants a tool not in any role's base
+        assert can_use_tool(MULTI_ID, "pardot_create_email")
+        # deny wins over the role-derived grant
+        assert not can_use_tool(MULTI_ID, "sf_create_opportunity_for_person")
+        # other role-derived tool still works
+        assert can_use_tool(MULTI_ID, "sf_log_touch")
+
+
+class TestAddRemoveRole:
+    """add_role / remove_role mutators."""
+
+    def test_add_role_appends(self, isolated_acl):
+        add_user(MULTI_ID, Role.SALES_REP)
+        msg = add_role(MULTI_ID, Role.READ_ONLY)
+        assert get_roles(MULTI_ID) == [Role.SALES_REP, Role.READ_ONLY]
+        assert "read_only" in msg
+
+    def test_add_role_idempotent(self, isolated_acl):
+        add_user(MULTI_ID, Role.SALES_REP)
+        msg = add_role(MULTI_ID, Role.SALES_REP)
+        assert "already has" in msg
+        assert get_roles(MULTI_ID) == [Role.SALES_REP]
+
+    def test_add_role_unknown_user(self, isolated_acl):
+        msg = add_role("UNOPE", Role.SALES_REP)
+        assert "not in the access list" in msg
+
+    def test_remove_role_drops_one(self, isolated_acl):
+        set_user_roles(MULTI_ID, [Role.SALES_REP, Role.READ_ONLY])
+        msg = remove_role(MULTI_ID, Role.READ_ONLY)
+        assert get_roles(MULTI_ID) == [Role.SALES_REP]
+        assert "sales_rep" in msg
+
+    def test_remove_role_refuses_last(self, isolated_acl):
+        add_user(MULTI_ID, Role.SALES_REP)
+        msg = remove_role(MULTI_ID, Role.SALES_REP)
+        assert "Cannot remove the last role" in msg
+        assert get_roles(MULTI_ID) == [Role.SALES_REP]
+
+    def test_remove_role_not_held(self, isolated_acl):
+        add_user(MULTI_ID, Role.SALES_REP)
+        msg = remove_role(MULTI_ID, Role.READ_ONLY)
+        assert "doesn't have" in msg
+
+    def test_add_role_preserves_overrides(self, isolated_acl):
+        add_user(MULTI_ID, Role.SALES_REP)
+        map_sf_user(MULTI_ID, "00599999")
+        add_role(MULTI_ID, Role.READ_ONLY)
+        assert get_sf_user_override(MULTI_ID) == "00599999"
+
+
+class TestMultiRoleAdminCommands:
+    """!access add with comma list, !access add-role, !access remove-role."""
+
+    def test_add_with_comma_separated_roles(self):
+        result = parse_admin_command(
+            f"!access add <@{MULTI_ID}> sales_rep,read_only", ADMIN_ID
+        )
+        assert "sales_rep" in result and "read_only" in result
+        assert get_roles(MULTI_ID) == [Role.SALES_REP, Role.READ_ONLY]
+
+    def test_add_with_whitespace_in_comma_list(self):
+        result = parse_admin_command(
+            f"!access add <@{MULTI_ID}> sales_rep, read_only", ADMIN_ID
+        )
+        assert get_roles(MULTI_ID) == [Role.SALES_REP, Role.READ_ONLY]
+
+    def test_add_role_command(self):
+        add_user(MULTI_ID, Role.SALES_REP)
+        result = parse_admin_command(
+            f"!access add-role <@{MULTI_ID}> read_only", ADMIN_ID
+        )
+        assert "Added" in result
+        assert get_roles(MULTI_ID) == [Role.SALES_REP, Role.READ_ONLY]
+
+    def test_remove_role_command(self):
+        set_user_roles(MULTI_ID, [Role.SALES_REP, Role.READ_ONLY])
+        result = parse_admin_command(
+            f"!access remove-role <@{MULTI_ID}> read_only", ADMIN_ID
+        )
+        assert "Removed" in result
+        assert get_roles(MULTI_ID) == [Role.SALES_REP]
+
+    def test_unknown_role_in_comma_list_rejects(self):
+        result = parse_admin_command(
+            f"!access add <@{MULTI_ID}> sales_rep,nonsense", ADMIN_ID
+        )
+        assert "Unknown role" in result
+        # Nothing should have been added.
+        assert get_roles(MULTI_ID) == []
+
+    def test_add_role_non_admin_denied(self):
+        add_user(SALES_REP_ID, Role.SALES_REP)
+        result = parse_admin_command(
+            f"!access add-role <@{SALES_REP_ID}> admin", SALES_REP_ID
+        )
+        assert "Only admins" in result
+
+    def test_list_renders_multiple_roles(self):
+        set_user_roles(MULTI_ID, [Role.SALES_REP, Role.READ_ONLY])
+        result = list_users()
+        # Both role names appear together on the same line for MULTI_ID.
+        line = next(l for l in result.splitlines() if MULTI_ID in l)
+        assert "`sales_rep`" in line
+        assert "`read_only`" in line
