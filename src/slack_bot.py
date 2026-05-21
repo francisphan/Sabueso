@@ -4,6 +4,11 @@ Runs as a separate process using Slack Socket Mode. Users can DM Sabueso
 or @mention it in channels to query Salesforce, NetSuite, and Pardot
 using plain English.
 
+Sales reps can also ask Sabueso to create Salesforce Opportunities and log
+touches. Those write operations halt the agent loop and surface as Block Kit
+confirmation cards; the @app.action handlers below dispatch to handlers.py
+once the rep clicks Confirm or Cancel.
+
 Usage:
     python src/main.py --bot   # Start the Slack bot
 """
@@ -14,7 +19,12 @@ import os
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from handlers import handle_direct_message, handle_mention
+from handlers import (
+    cancel_pending,
+    execute_pending,
+    handle_direct_message,
+    handle_mention,
+)
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +50,21 @@ def _create_app() -> App:
     def on_mention(event, say, client, logger):
         logger.info("Mention in channel=%s by user=%s", event["channel"], event["user"])
         handle_mention(event=event, say=say, client=client)
+
+    # ── Confirmation card buttons ───────────────────────────────────────
+    @app.action("sabueso_confirm_op")
+    def on_confirm(ack, body, client, logger):
+        ack()
+        action_id = body["actions"][0]["value"]
+        logger.info("confirm clicked by user=%s action_id=%s", body["user"]["id"], action_id)
+        execute_pending(action_id=action_id, body=body, client=client)
+
+    @app.action("sabueso_cancel_op")
+    def on_cancel(ack, body, client, logger):
+        ack()
+        action_id = body["actions"][0]["value"]
+        logger.info("cancel clicked by user=%s action_id=%s", body["user"]["id"], action_id)
+        cancel_pending(action_id=action_id, body=body, client=client)
 
     # ── Catch-all so Bolt doesn't warn about unhandled events ───────────
     @app.event("message")

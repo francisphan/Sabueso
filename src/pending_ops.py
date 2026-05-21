@@ -29,6 +29,9 @@ class PendingOp:
     channel: str
     thread_ts: str | None
     expires_at: float
+    # Original user text that triggered this pending op — used to update
+    # conversation history after confirm/cancel.
+    user_message: str = ""
 
 
 _pending: dict[str, PendingOp] = {}
@@ -43,6 +46,7 @@ def register(
     requester_user_id: str,
     channel: str,
     thread_ts: str | None,
+    user_message: str = "",
     ttl_seconds: int = _TTL_SECONDS,
 ) -> PendingOp:
     action_id = uuid.uuid4().hex
@@ -55,6 +59,7 @@ def register(
         channel=channel,
         thread_ts=thread_ts,
         expires_at=time.time() + ttl_seconds,
+        user_message=user_message,
     )
     with _lock:
         _purge_expired_locked()
@@ -72,6 +77,31 @@ def pop(action_id: str) -> PendingOp | None:
     if op.expires_at < time.time():
         return None
     return op
+
+
+def pop_if_authorized(
+    action_id: str, clicker_user_id: str
+) -> tuple[PendingOp | None, str | None]:
+    """Atomic pop gated by requester match.
+
+    Returns:
+        (op, None) on success — op was popped and is ready to execute.
+        (None, "expired") if the op is missing or its TTL has elapsed.
+        (None, "forbidden") if the clicker is not the originator — the op
+            is left in place so the rightful user can still confirm.
+    """
+    with _lock:
+        _purge_expired_locked()
+        op = _pending.get(action_id)
+        if op is None:
+            return (None, "expired")
+        if op.expires_at < time.time():
+            del _pending[action_id]
+            return (None, "expired")
+        if clicker_user_id != op.requester_user_id:
+            return (None, "forbidden")
+        del _pending[action_id]
+        return (op, None)
 
 
 def _purge_expired_locked() -> None:
