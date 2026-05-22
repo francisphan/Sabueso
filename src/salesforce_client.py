@@ -71,6 +71,7 @@ def _fetch_stay_counts(sf: Salesforce, account_ids: list[str]) -> dict[str, int]
         "SELECT Contact__r.AccountId acctId, COUNT(Id) cnt "
         "FROM TVRS_Guest__c "
         f"WHERE Contact__r.AccountId IN ({ids_str}) "
+        "AND Check_Out_Date__c < TODAY "
         "GROUP BY Contact__r.AccountId"
     )
     log.info("Fetching stay counts for %d account(s)…", len(account_ids))
