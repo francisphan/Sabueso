@@ -114,7 +114,9 @@ def call_tool(tool_name: str, arguments: dict) -> dict | list | str:
         },
     }
 
-    log.info("MCP call: %s(%s)", tool_name, arguments)
+    # Arguments can carry guest PII — log at DEBUG, keep tool name at INFO.
+    log.info("MCP call: %s", tool_name)
+    log.debug("MCP call args: %s(%s)", tool_name, arguments)
 
     resp = requests.post(
         _endpoint(),
@@ -141,7 +143,9 @@ def call_tool(tool_name: str, arguments: dict) -> dict | list | str:
     resp.raise_for_status()
 
     result = _parse_sse_response(resp, request_id)
-    log.info("MCP result for %s (%d chars): %.500s", tool_name, len(str(result)), str(result))
+    # Result bodies carry guest PII / financials — keep the body at DEBUG.
+    log.info("MCP result for %s (%d chars)", tool_name, len(str(result)))
+    log.debug("MCP result body for %s: %.500s", tool_name, str(result))
     return result
 
 

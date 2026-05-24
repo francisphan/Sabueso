@@ -42,6 +42,26 @@ _MAX_HISTORY = 20
 _METRICS_PATH = Path(os.getenv("METRICS_FILE", ".cache/metrics.jsonl"))
 _metrics_lock = threading.Lock()
 
+# Short-lived set of processed Slack event keys. Slack re-delivers an event if
+# our listener is slow (e.g. during an image download); without this guard the
+# same message gets processed twice — double answers, or two independently
+# confirmable write cards for one request.
+_SEEN_TTL_SECONDS = 600
+_seen_events: dict[str, float] = {}
+_seen_lock = threading.Lock()
+
+
+def _already_processed(key: str) -> bool:
+    """Record *key* and report whether it had already been seen (TTL-pruned)."""
+    now = time.monotonic()
+    with _seen_lock:
+        for k in [k for k, t in _seen_events.items() if now - t > _SEEN_TTL_SECONDS]:
+            del _seen_events[k]
+        if key in _seen_events:
+            return True
+        _seen_events[key] = now
+        return False
+
 
 def _convo_key(user_id: str, channel: str, thread_ts: str | None) -> tuple[str, str, str]:
     return (user_id, channel, thread_ts or "")
@@ -112,7 +132,7 @@ def _extract_images(event: dict, client: "WebClient") -> list[dict]:
             continue
         try:
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with _no_redirect_opener.open(req, timeout=15) as resp:
+            with _no_redirect_opener.open(req, timeout=10) as resp:
                 data = resp.read(_MAX_IMAGE_BYTES + 1)
             if len(data) > _MAX_IMAGE_BYTES:
                 log.warning("Skipping image %s — exceeded size cap mid-download", f.get("name"))
@@ -138,7 +158,7 @@ def handle_direct_message(event: dict, say, client: "WebClient"):
         thread_ts=event.get("thread_ts"),
         say=say,
         client=client,
-        images=_extract_images(event, client),
+        event=event,
     )
 
 
@@ -153,7 +173,7 @@ def handle_mention(event: dict, say, client: "WebClient"):
         thread_ts=event.get("thread_ts"),
         say=say,
         client=client,
-        images=_extract_images(event, client),
+        event=event,
     )
 
 
@@ -166,10 +186,18 @@ def _process_message(
     thread_ts: str | None,
     say,
     client: "WebClient",
-    images: list[dict] | None = None,
+    event: dict | None = None,
 ):
+    event = event or {}
     reply_ts = thread_ts or None
-    images = images or []
+
+    # Drop Slack re-deliveries before doing any work, so a slow turn that trips a
+    # retry isn't answered (or write-confirmed) twice. Keyed on the stable
+    # client_msg_id, falling back to channel+ts.
+    dedup_key = event.get("client_msg_id") or f"{channel}:{event.get('ts')}"
+    if event and _already_processed(dedup_key):
+        log.info("Skipping duplicate Slack event %s", dedup_key)
+        return
 
     try:
         # Image-only messages have no text — skip the admin-command parse, which
@@ -186,6 +214,10 @@ def _process_message(
             return
 
         say(text="_Sniffing around..._", thread_ts=reply_ts)
+
+        # Download image attachments AFTER acking: the user gets immediate
+        # feedback and the listener isn't blocked on network I/O up front.
+        images = _extract_images(event, client)
 
         key = _convo_key(user_id, channel, thread_ts)
         with _conversations_lock:

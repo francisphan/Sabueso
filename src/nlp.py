@@ -56,6 +56,16 @@ MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = 4096
 MAX_STEPS = 8  # safety limit on tool-call iterations
 
+# Tool inputs/outputs and user-message text carry guest PII and financial data,
+# so they're logged at DEBUG (suppressed at the default INFO level). INFO keeps
+# only metadata (tool names, byte lengths, step/stop_reason). Set
+# SABUESO_DEBUG_PAYLOADS=true to surface the payloads at INFO for local debugging.
+_PAYLOAD_LEVEL = (
+    logging.INFO
+    if os.getenv("SABUESO_DEBUG_PAYLOADS", "").strip().lower() in ("1", "true", "yes")
+    else logging.DEBUG
+)
+
 SYSTEM_PROMPT = """\
 You are Sabueso, a data bloodhound embedded in Slack for The Vines of Mendoza,
 a luxury private residence and wine hotel in Mendoza, Argentina. Your job is to
@@ -351,7 +361,8 @@ def run_agent(
         }
     ]
 
-    log.info("=== AGENT START === user_message=%r history_len=%d", message, len(messages) - 1)
+    log.info("=== AGENT START === history_len=%d images=%d", len(messages) - 1, len(images or []))
+    log.log(_PAYLOAD_LEVEL, "  user_message=%r", message)
 
     response = None
     for step in range(MAX_STEPS):
@@ -379,9 +390,10 @@ def run_agent(
 
         for i, block in enumerate(response.content):
             if block.type == "text":
-                log.info("  Step %d block[%d] TEXT: %s", step, i, block.text[:1000])
+                log.log(_PAYLOAD_LEVEL, "  Step %d block[%d] TEXT: %s", step, i, block.text[:1000])
             elif block.type == "tool_use":
-                log.info("  Step %d block[%d] TOOL_USE: %s(%s)", step, i, block.name, json.dumps(block.input, default=str)[:500])
+                log.info("  Step %d block[%d] TOOL_USE: %s", step, i, block.name)
+                log.log(_PAYLOAD_LEVEL, "    args: %s", json.dumps(block.input, default=str)[:500])
         log.info("  Step %d stop_reason=%s usage=%s", step, response.stop_reason, {
             "input": usage.input_tokens,
             "output": usage.output_tokens,
@@ -430,14 +442,16 @@ def run_agent(
             arguments = tool_call.input or {}
             result.tool_calls.append(tool_name)
 
-            log.info("  Executing tool: %s(%s)", tool_name, json.dumps(arguments, default=str))
+            log.info("  Executing tool: %s", tool_name)
+            log.log(_PAYLOAD_LEVEL, "    args: %s", json.dumps(arguments, default=str))
 
             try:
                 tool_output = tool_executor(tool_name, arguments)
                 result_str = json.dumps(tool_output, default=str)
                 if len(result_str) > 80_000:
                     result_str = result_str[:80_000] + "\n... [truncated]"
-                log.info("  Tool %s returned %d chars: %.1000s", tool_name, len(result_str), result_str)
+                log.info("  Tool %s returned %d chars", tool_name, len(result_str))
+                log.log(_PAYLOAD_LEVEL, "    result: %.1000s", result_str)
             except Exception as e:
                 log.error("  Tool %s FAILED: %s", tool_name, e, exc_info=True)
                 err_type = type(e).__name__
