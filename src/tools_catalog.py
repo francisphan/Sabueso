@@ -172,9 +172,11 @@ TOOLS: list[dict] = [
             "Identify the OWNER of an on-property wine from its bottle-label text. "
             "Given the brand/name read off a wine label (e.g. 'Dos Abogados'), "
             "returns the owner's identity & contact, their wines + remaining stock, "
-            "and best-effort whether they are currently in-house. This is the "
-            "PRIMARY tool when a user sends a wine-label photo and asks whose wine "
-            "it is. Matching tolerates partial/accented/noisy label reads."
+            "WINEMAKING detail (blend, ABV, barrel name + new-oak barrel count, and "
+            "an estimated aging window in months), and best-effort whether they are "
+            "currently in-house. This is the PRIMARY tool when a user sends a "
+            "wine-label photo and asks whose wine it is, OR asks about a wine's "
+            "barrels/aging/blend. Matching tolerates partial/accented/noisy reads."
         ),
         "input_schema": {
             "type": "object",
@@ -189,6 +191,15 @@ TOOLS: list[dict] = [
                 "include_inventory": {
                     "type": "boolean",
                     "description": "Return the owner's wine items + on-hand stock (default true).",
+                    "default": True,
+                },
+                "include_winemaking": {
+                    "type": "boolean",
+                    "description": (
+                        "Return per-bottling winemaking detail: blend, ABV, barrel "
+                        "name + new-oak barrel count, and an estimated aging window "
+                        "(default true). Entry is manual so coverage is uneven."
+                    ),
                     "default": True,
                 },
                 "enrich_guest_profile": {
