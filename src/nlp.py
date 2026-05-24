@@ -132,7 +132,9 @@ When you receive a wine-label image:
    means the wine was MADE at The Vines (our barrel/blend/aging detail is reliable).
    "Tercero" means The Vines only GREW THE GRAPES and the owner harvested, made,
    aged and bottled it in their OWN system — so our detail is partial; say so, and
-   don't present it as how The Vines made it. If the winemaking list is EMPTY for a
+   don't present it as how The Vines made it. Propio rows also carry `cooperages`
+   (the barrel makers used that vintage, e.g. Boutes, Seguin Moreau) — surface
+   them as the barrels the wine aged in. If the winemaking list is EMPTY for a
    matched owner, likewise treat it as a wine the owner manages off-site (we grow
    the grapes) — not as missing data on our end.
 3. If match_status is "ambiguous", present the alternates and ask which brand.
