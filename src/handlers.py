@@ -24,7 +24,7 @@ import permissions
 import pending_ops
 import sf_intents
 from mcp_client import call_tool
-from nlp import AgentResult, run_agent, build_history_from_agent_run
+from nlp import AgentResult, run_agent, build_history_from_agent_run, _escape_mrkdwn
 from permissions import check_access, parse_admin_command, can_use_tool
 from pending_ops import PendingOp
 from tools_catalog import INTENT_TOOLS
@@ -531,7 +531,7 @@ def _format_intent_result(tool_name: str, result: dict) -> str:
 
     if tool_name == "sf_create_opportunity_for_person":
         if status == "ok":
-            lines = [f"✅ Created opportunity for *{result.get('person_name', '?')}*"]
+            lines = [f"✅ Created opportunity for *{_escape_mrkdwn(result.get('person_name', '?'))}*"]
             url = result.get("opp_url")
             if url and url.startswith("http"):
                 lines.append(f"🔗 <{url}|View in Salesforce>")
@@ -539,8 +539,8 @@ def _format_intent_result(tool_name: str, result: dict) -> str:
                 lines.append(f"Opportunity ID: `{url}`")
             touches = result.get("touches", []) or []
             if touches:
-                ok = [t.get("subject") for t in touches if t.get("ok")]
-                bad = [t.get("subject") for t in touches if not t.get("ok")]
+                ok = [_escape_mrkdwn(t.get("subject")) for t in touches if t.get("ok")]
+                bad = [_escape_mrkdwn(t.get("subject")) for t in touches if not t.get("ok")]
                 if ok:
                     lines.append(f"📝 Logged touches: {', '.join(ok)}")
                 if bad:
@@ -554,49 +554,52 @@ def _format_intent_result(tool_name: str, result: dict) -> str:
         if status == "ok":
             url = result.get("opp_url")
             link = f"<{url}|opportunity>" if url and url.startswith("http") else "opportunity"
-            return f"✅ Logged *{result.get('subject', 'touch')}* on {link}"
+            return f"✅ Logged *{_escape_mrkdwn(result.get('subject', 'touch'))}* on {link}"
         return _format_failure(status, result, "log the touch")
 
     return f"Status: `{status}`\n```{json.dumps(result, indent=2, default=str)}```"
 
 
 def _format_failure(status: str | None, result: dict, action: str) -> str:
+    # All record-derived / free-text values below are rendered into Slack mrkdwn,
+    # so they pass through _escape_mrkdwn to defang pings (<!channel>) and link
+    # spoofing (<http://evil|Salesforce>) coming from SF data the user controls.
     if status == "needs_person_details":
-        return result.get(
+        return _escape_mrkdwn(result.get(
             "message",
             "I don't see anyone matching. Can you give me their email or phone?",
-        )
+        ))
     if status == "ambiguous_person":
         candidates = result.get("candidates", []) or []
         lines = ["I see multiple matches — which one did you mean?"]
         for c in candidates:
-            name = c.get("name") or c.get("Name") or "?"
-            email = c.get("email") or c.get("Email") or "(no email)"
+            name = _escape_mrkdwn(c.get("name") or c.get("Name") or "?")
+            email = _escape_mrkdwn(c.get("email") or c.get("Email") or "(no email)")
             lines.append(f"• *{name}* — {email}")
         return "\n".join(lines)
     if status == "no_sf_identity":
-        return result.get(
+        return _escape_mrkdwn(result.get(
             "message",
             "I can't find a Salesforce user matching your Slack email. "
             "Ask an admin to run `!access map @you <sf_user_id>`.",
-        )
+        ))
     if status == "invalid_product":
         expected = ", ".join(result.get("expected", []) or [])
-        return f"Unknown product. Expected one of: {expected}."
+        return f"Unknown product. Expected one of: {_escape_mrkdwn(expected)}."
     if status == "invalid_subject":
-        return f"Unknown touch subject: `{result.get('subject', '?')}`."
+        return f"Unknown touch subject: `{_escape_mrkdwn(result.get('subject', '?'))}`."
     if status == "no_open_opps":
-        return result.get("message", "No open opportunities found for that person.")
+        return _escape_mrkdwn(result.get("message", "No open opportunities found for that person."))
     if status == "ambiguous_opp":
         candidates = result.get("candidates", []) or []
         lines = ["Multiple open opportunities — which one?"]
         for c in candidates:
-            name = c.get("name") or c.get("Name") or "?"
-            stage = c.get("stage") or c.get("StageName") or "?"
+            name = _escape_mrkdwn(c.get("name") or c.get("Name") or "?")
+            stage = _escape_mrkdwn(c.get("stage") or c.get("StageName") or "?")
             lines.append(f"• *{name}* — {stage}")
         return "\n".join(lines)
     if status == "create_failed":
-        err = result.get("error", "")
+        err = _escape_mrkdwn(result.get("error", ""))
         return f"Failed to {action}: {err}".strip()
     return f"Couldn't {action}: status `{status}`."
 
