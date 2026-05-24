@@ -351,6 +351,37 @@ class TestAddRemoveUser:
         assert get_role(READER_ID) == Role.READ_ONLY
 
 
+class TestFreshBoot:
+    """A brand-new environment (ACL_FILE points at an empty volume) must come up
+    with the bootstrap admin — never crash, never an empty (lock-everyone-out) ACL.
+
+    Durability of runtime !access changes is handled in production by a persistent
+    Railway volume mounted where ACL_FILE points; these tests guard the in-code
+    fallback that runs the first time that file doesn't yet exist.
+    """
+
+    def test_missing_acl_file_seeds_admin_and_persists(self, tmp_path, monkeypatch):
+        fresh = tmp_path / "fresh_acl.json"
+        monkeypatch.setattr(permissions, "_ACL_PATH", fresh)
+        monkeypatch.setattr(permissions, "_DEFAULT_ADMIN", "UBOOT")
+        assert not fresh.exists()
+
+        acl = permissions._load_acl()
+
+        assert acl, "fresh ACL must not be empty"
+        assert "UBOOT" in acl and Role.ADMIN in acl["UBOOT"].roles
+        # Persisted, so subsequent reads are stable across the process lifetime.
+        assert fresh.exists()
+        assert json.loads(fresh.read_text()) == {"UBOOT": "admin"}
+
+    def test_fresh_boot_admin_not_locked_out(self, tmp_path, monkeypatch):
+        fresh = tmp_path / "fresh2.json"
+        monkeypatch.setattr(permissions, "_ACL_PATH", fresh)
+        monkeypatch.setattr(permissions, "_DEFAULT_ADMIN", "UBOOT")
+        assert is_admin("UBOOT")
+        assert check_access("UBOOT") is None
+
+
 class TestListUsers:
     def test_list_with_users(self):
         result = list_users()
