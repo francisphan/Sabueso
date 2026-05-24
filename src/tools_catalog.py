@@ -165,6 +165,44 @@ TOOLS: list[dict] = [
             "required": ["email"],
         },
     },
+    # ── Wine label → owner (sommelier) ─────────────────────────────────────
+    {
+        "name": "wine_owner_lookup",
+        "description": (
+            "Identify the OWNER of an on-property wine from its bottle-label text. "
+            "Given the brand/name read off a wine label (e.g. 'Dos Abogados'), "
+            "returns the owner's identity & contact, their wines + remaining stock, "
+            "and best-effort whether they are currently in-house. This is the "
+            "PRIMARY tool when a user sends a wine-label photo and asks whose wine "
+            "it is. Matching tolerates partial/accented/noisy label reads."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "label_text": {
+                    "type": "string",
+                    "description": (
+                        "Brand / wine name read from the label. Extra words "
+                        "(varietal, vintage, 'The Vines of Mendoza') are fine."
+                    ),
+                },
+                "include_inventory": {
+                    "type": "boolean",
+                    "description": "Return the owner's wine items + on-hand stock (default true).",
+                    "default": True,
+                },
+                "enrich_guest_profile": {
+                    "type": "boolean",
+                    "description": (
+                        "Attach cross-system guest_360 profile (stays, in-house "
+                        "status, financials) when available (default true)."
+                    ),
+                    "default": True,
+                },
+            },
+            "required": ["label_text"],
+        },
+    },
     # ── Cross-system lookups ──────────────────────────────────────────────
     {
         "name": "guest_360_profile",

@@ -97,6 +97,28 @@ user a complete answer.
 - When you need full details on a NetSuite record, use ns_rest_get with the
   record type and ID — this returns ALL fields including custom ones.
 
+## Wine label lookup (sommelier use case)
+Users (especially the restaurant sommelier) may send a PHOTO of a wine bottle
+label and ask whose wine it is. Almost every wine poured at the restaurant is
+made on-property for a private owner, and the owner is identified by the
+proprietary BRAND NAME on the label.
+
+When you receive a wine-label image:
+1. Read the label: the brand/wine name (the proprietary name, e.g. "Dos Abogados"),
+   plus varietal and vintage if visible. The brand is the big proprietary name,
+   NOT the grape ("Malbec") or "The Vines of Mendoza".
+2. Call `wine_owner_lookup` with that text as label_text. It returns the owner's
+   identity & contact, their wines + remaining stock, and (best effort) whether
+   they're currently in-house. ONE call gets everything — prefer it over manual
+   ns_/sf_ queries for this use case.
+3. If match_status is "ambiguous", present the alternates and ask which brand.
+   If "low_confidence", give the best-guess owner but say you're not certain and
+   ask the user to confirm (don't state ownership as fact). If "not_found", tell
+   the user it may be a third-party wine or ask for a clearer read of the brand.
+4. Salesforce is sometimes unavailable; wine_owner_lookup still returns the
+   NetSuite owner + inventory. Report what you have and note if enrichment
+   (stay history / in-house status) was unavailable — don't fail the whole answer.
+
 ## Guest lookup strategy (IMPORTANT)
 When looking up a person/guest, the starting point is ALWAYS Contact or Account
 (Person Account), NOT TVRS_Guest__c.
@@ -273,10 +295,40 @@ def _get_client() -> anthropic.Anthropic:
 # ---------------------------------------------------------------------------
 # Agentic loop
 # ---------------------------------------------------------------------------
+def _build_user_content(message: str, images: list[dict] | None) -> Any:
+    """Build the user-turn content: a plain string, or text+image blocks.
+
+    ``images`` is a list of {"media_type", "data"(base64)} dicts. When present we
+    must send a content-block list; a short caption is synthesized for image-only
+    messages so Claude knows what to do with the picture.
+    """
+    if not images:
+        return message
+    blocks: list[dict[str, Any]] = []
+    caption = message.strip() or (
+        "Here is a photo of a wine bottle label. Identify the wine and look up "
+        "its owner."
+    )
+    blocks.append({"type": "text", "text": caption})
+    for img in images:
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img["media_type"],
+                    "data": img["data"],
+                },
+            }
+        )
+    return blocks
+
+
 def run_agent(
     message: str,
     tool_executor: Callable[[str, dict], Any],
     conversation_history: list[dict[str, Any]] | None = None,
+    images: list[dict] | None = None,
 ) -> AgentResult:
     """Run the agentic tool-use loop and return the final response + telemetry."""
     client = _get_client()
@@ -284,7 +336,7 @@ def run_agent(
     messages: list[dict[str, Any]] = []
     if conversation_history:
         messages.extend(conversation_history)
-    messages.append({"role": "user", "content": message})
+    messages.append({"role": "user", "content": _build_user_content(message, images)})
 
     result = AgentResult(text="")
 
