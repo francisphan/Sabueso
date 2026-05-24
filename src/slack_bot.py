@@ -38,11 +38,13 @@ def _create_app() -> App:
         "message",
         matchers=[
             lambda event: event.get("channel_type") == "im",
-            lambda event: event.get("subtype") is None,
+            # subtype is None for plain text; "file_share" carries image/file
+            # uploads (e.g. a sommelier sending a wine-label photo).
+            lambda event: event.get("subtype") in (None, "file_share"),
         ],
     )
     def on_dm(event, say, client, logger):
-        logger.info("DM from user=%s", event["user"])
+        logger.info("DM from user=%s files=%d", event["user"], len(event.get("files") or []))
         handle_direct_message(event=event, say=say, client=client)
 
     # ── @Mentions in channels ───────────────────────────────────────────

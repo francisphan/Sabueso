@@ -7,14 +7,18 @@ handler in slack_bot.py calls execute_pending() / cancel_pending() on click.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import permissions
 import pending_ops
@@ -45,17 +49,96 @@ def _convo_key(user_id: str, channel: str, thread_ts: str | None) -> tuple[str, 
 
 _SLACK_MAX_CHARS = 39_000
 
+# Image attachments (e.g. a sommelier's wine-label photo) are passed to Claude
+# as vision blocks. Anthropic accepts jpeg/png/gif/webp; cap size/count so a
+# stray large upload can't blow the request size or token budget.
+_VISION_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+_MAX_IMAGES = 3
+# Only ever send the bot token to Slack's own hosts. Slack serves private files
+# from files.slack.com / *.slack.com / *.slack-edge.com.
+_SLACK_HOST_SUFFIXES = (".slack.com", ".slack-edge.com")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so a credentialed file fetch can't be bounced to an
+    attacker-controlled or internal host (the bot token rides in the header)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(newurl, code, f"redirect blocked: {newurl}", headers, fp)
+
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _is_slack_host(url: str) -> bool:
+    """True only for https URLs served by a Slack-owned host."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and (
+        host == "slack.com" or host.endswith(_SLACK_HOST_SUFFIXES)
+    )
+
+
+def _extract_images(event: dict, client: "WebClient") -> list[dict]:
+    """Download image attachments from a Slack event into Claude vision blocks.
+
+    Slack hosts uploads behind an authenticated URL, so we fetch the private
+    download URL with the bot token. To avoid SSRF / token leakage we only send
+    the credential to Slack-owned https hosts and refuse redirects. Non-images,
+    non-Slack URLs, oversized files, and download failures are skipped (logged,
+    not fatal).
+    """
+    files = event.get("files") or []
+    if not files:
+        return []
+
+    token = getattr(client, "token", None) or os.environ.get("SLACK_BOT_TOKEN")
+    images: list[dict] = []
+    for f in files:
+        if len(images) >= _MAX_IMAGES:
+            break
+        media_type = (f.get("mimetype") or "").lower()
+        if media_type not in _VISION_MEDIA_TYPES:
+            continue
+        if (f.get("size") or 0) > _MAX_IMAGE_BYTES:
+            log.warning("Skipping oversized image %s (%s bytes)", f.get("name"), f.get("size"))
+            continue
+        url = f.get("url_private_download") or f.get("url_private")
+        if not url:
+            continue
+        if not _is_slack_host(url):
+            log.warning("Skipping image %s — non-Slack URL host", f.get("name"))
+            continue
+        try:
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with _no_redirect_opener.open(req, timeout=15) as resp:
+                data = resp.read(_MAX_IMAGE_BYTES + 1)
+            if len(data) > _MAX_IMAGE_BYTES:
+                log.warning("Skipping image %s — exceeded size cap mid-download", f.get("name"))
+                continue
+            images.append(
+                {
+                    "media_type": media_type,
+                    "data": base64.standard_b64encode(data).decode("ascii"),
+                }
+            )
+        except Exception:
+            log.exception("Failed to download Slack image %s", f.get("name"))
+    return images
+
 
 # ── Public entry points (called by slack_bot.py) ────────────────────────────
 
 def handle_direct_message(event: dict, say, client: "WebClient"):
     _process_message(
-        text=event["text"],
+        text=event.get("text", ""),
         user_id=event["user"],
         channel=event["channel"],
         thread_ts=event.get("thread_ts"),
         say=say,
         client=client,
+        images=_extract_images(event, client),
     )
 
 
@@ -70,6 +153,7 @@ def handle_mention(event: dict, say, client: "WebClient"):
         thread_ts=event.get("thread_ts"),
         say=say,
         client=client,
+        images=_extract_images(event, client),
     )
 
 
@@ -82,14 +166,19 @@ def _process_message(
     thread_ts: str | None,
     say,
     client: "WebClient",
+    images: list[dict] | None = None,
 ):
     reply_ts = thread_ts or None
+    images = images or []
 
     try:
-        admin_response = parse_admin_command(text, user_id)
-        if admin_response is not None:
-            say(text=admin_response, thread_ts=reply_ts)
-            return
+        # Image-only messages have no text — skip the admin-command parse, which
+        # only ever matches the leading "!" command syntax anyway.
+        if text.strip():
+            admin_response = parse_admin_command(text, user_id)
+            if admin_response is not None:
+                say(text=admin_response, thread_ts=reply_ts)
+                return
 
         denial = check_access(user_id)
         if denial:
@@ -102,6 +191,10 @@ def _process_message(
         with _conversations_lock:
             history = list(_conversations.get(key, []))
 
+        # History is stored text-only; record a placeholder when the turn was
+        # just an image so follow-up context stays coherent and non-empty.
+        history_text = text if text.strip() else "[sent an image]"
+
         started = time.monotonic()
         result: AgentResult | None = None
         unhandled_error: str | None = None
@@ -110,13 +203,14 @@ def _process_message(
                 message=text,
                 tool_executor=call_tool,
                 conversation_history=history or None,
+                images=images,
             )
 
             if result.pending_confirmation is not None:
-                _handle_pending(result, text, user_id, channel, thread_ts, say)
+                _handle_pending(result, history_text, user_id, channel, thread_ts, say)
             else:
                 _send_response(say, result.text, reply_ts)
-                _append_history(key, text, result.text)
+                _append_history(key, history_text, result.text)
         except Exception as exc:
             unhandled_error = type(exc).__name__
             raise
