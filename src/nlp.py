@@ -21,6 +21,7 @@ from typing import Any, Callable
 import anthropic
 
 from tools_catalog import TOOLS, WRITE_OPERATIONS, OPPORTUNITY_PRODUCTS, TOUCH_SUBJECTS
+from tracing import new_turn_id, set_correlation_id
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,9 @@ class AgentResult:
     max_steps_hit: bool = False
     blocked_writes: int = 0
     error_type: str | None = None
+    # Per-turn correlation ID, sent to the MCP server so its tool logs can be
+    # tied back to this run. Logged in AGENT START / DONE lines.
+    correlation_id: str | None = None
     # Set when the loop halted on a write tool; handlers turns this into a
     # registered pending_op and posts a confirmation card instead of `text`.
     pending_confirmation: PendingConfirmation | None = None
@@ -395,7 +399,17 @@ def run_agent(
         }
     ]
 
-    log.info("=== AGENT START === history_len=%d images=%d", len(messages) - 1, len(images or []))
+    # Mint a correlation ID for this turn and propagate it to every MCP tool
+    # call (via the X-Correlation-ID header) so the server's per-tool logs can
+    # be traced back to this run.
+    turn_id = new_turn_id()
+    set_correlation_id(turn_id)
+    result.correlation_id = turn_id
+
+    log.info(
+        "=== AGENT START === corr=%s history_len=%d images=%d",
+        turn_id, len(messages) - 1, len(images or []),
+    )
     log.log(_PAYLOAD_LEVEL, "  user_message=%r", message)
 
     response = None
@@ -437,13 +451,13 @@ def run_agent(
 
         if response.stop_reason == "end_turn":
             result.text = _extract_text(response)
-            log.info("=== AGENT DONE === steps=%d final_len=%d", result.steps, len(result.text))
+            log.info("=== AGENT DONE === corr=%s steps=%d final_len=%d", turn_id, result.steps, len(result.text))
             return result
 
         tool_calls = [b for b in response.content if b.type == "tool_use"]
         if not tool_calls:
             result.text = _extract_text(response)
-            log.info("=== AGENT DONE (no tools) === steps=%d final_len=%d", result.steps, len(result.text))
+            log.info("=== AGENT DONE (no tools) === corr=%s steps=%d final_len=%d", turn_id, result.steps, len(result.text))
             return result
 
         # Halt the loop if any tool in this batch is a write — surface as a
@@ -465,7 +479,7 @@ def run_agent(
                 arguments=arguments,
                 summary=_summarize_pending(write_call.name, arguments),
             )
-            log.info("=== AGENT HALTED ON WRITE === tool=%s steps=%d", write_call.name, result.steps)
+            log.info("=== AGENT HALTED ON WRITE === corr=%s tool=%s steps=%d", turn_id, write_call.name, result.steps)
             return result
 
         messages.append({"role": "assistant", "content": response.content})
@@ -503,7 +517,7 @@ def run_agent(
         messages.append({"role": "user", "content": tool_results})
 
     result.max_steps_hit = True
-    log.warning("=== AGENT HIT MAX STEPS (%d) ===", MAX_STEPS)
+    log.warning("=== AGENT HIT MAX STEPS (%d) === corr=%s", MAX_STEPS, turn_id)
     result.text = (
         _extract_text(response) if response is not None else ""
     ) or "I got a bit lost sniffing around. Could you try a simpler question?"
