@@ -1231,9 +1231,16 @@ async def _profile_all(guests: list[dict]) -> list[dict]:
         len(guests), GEMINI_MODEL, CLAUDE_MODEL, rpm,
     )
 
+    # Imported lazily: wine_enrichment imports helpers from this module, so a
+    # top-level import here would be circular.
+    from wine_enrichment import attach_wine_owner
+
     async def staggered(i: int, guest: dict) -> dict:
         await asyncio.sleep(i * delay)
-        return await _profile_one(gemini, claude, sem, scrape_sem, guest)
+        profiled = await _profile_one(gemini, claude, sem, scrape_sem, guest)
+        # Best-effort: tag wine owners (NetSuite via Agent B) + research their
+        # label on the open web. Never raises — degrades to the bare profile.
+        return await attach_wine_owner(profiled, gemini=gemini)
 
     tasks = [staggered(i, g) for i, g in enumerate(guests)]
     results = await asyncio.gather(*tasks, return_exceptions=True)

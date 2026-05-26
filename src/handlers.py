@@ -28,11 +28,32 @@ from nlp import AgentResult, run_agent, build_history_from_agent_run, _escape_mr
 from permissions import check_access, parse_admin_command, can_use_tool
 from pending_ops import PendingOp
 from tools_catalog import INTENT_TOOLS
+from wine_enrichment import research_wine_sync
 
 if TYPE_CHECKING:
     from slack_sdk import WebClient
 
 log = logging.getLogger(__name__)
+
+
+def _execute_tool(tool_name: str, arguments: dict):
+    """Dispatch a tool call from the agent loop.
+
+    ``wine_research`` runs locally — Agent B has no web access, so public wine
+    research is done here via Gemini + Google Search grounding. Every other tool
+    is delegated to the Agent B MCP server.
+    """
+    if tool_name == "wine_research":
+        result = research_wine_sync(
+            brand=arguments.get("brand", ""),
+            owner_name=arguments.get("owner_name"),
+            vintage=arguments.get("vintage"),
+        )
+        return result or {
+            "found": False,
+            "summary": "No public information found for this wine.",
+        }
+    return call_tool(tool_name, arguments)
 
 # Conversation history keyed by (user_id, channel, thread_ts).
 _conversations: dict[tuple[str, str, str], list[dict]] = {}
@@ -233,7 +254,7 @@ def _process_message(
         try:
             result = run_agent(
                 message=text,
-                tool_executor=call_tool,
+                tool_executor=_execute_tool,
                 conversation_history=history or None,
                 images=images,
             )

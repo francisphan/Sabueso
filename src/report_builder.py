@@ -1,6 +1,7 @@
 """Build an HTML email report from a list of profiled guest dicts."""
 
 import base64
+import html
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
@@ -63,6 +64,12 @@ h1 { font-size: 22px; color: #1a1a2e; margin-bottom: 4px; }
 .staff-notes { background: #fff8e1; border-left: 3px solid #f9a825; border-radius: 4px;
                padding: 12px 16px; margin-bottom: 12px; font-size: 13px; color: #555; line-height: 1.6; }
 .staff-notes strong { color: #7b5800; }
+.winemaker { background: #f3e9f5; border-left: 3px solid #7b1fa2; border-radius: 4px;
+             padding: 12px 16px; margin-bottom: 12px; font-size: 13px; color: #4a2a52; line-height: 1.6; }
+.winemaker strong { color: #5e1a6b; }
+.winemaker .wm-ratings { color: #6a4a72; font-size: 12px; }
+.winemaker a { color: #7b1fa2; font-size: 12px; text-decoration: none; }
+.winemaker a:hover { text-decoration: underline; }
 """
 
 
@@ -103,6 +110,76 @@ def _fmt_date(iso: str) -> str:
         return date.fromisoformat(iso).strftime("%b %d, %Y")
     except ValueError:
         return iso
+
+
+def _winemaker_section(guest: dict) -> str:
+    """Render the 'Wine Owner' box for a guest matched to a NetSuite wine owner.
+
+    Shows the label + owner code, and — when the label was researchable on the
+    open web — a summary, winemaking detail, ratings, and source links. Returns
+    an empty string for non-winemakers.
+    """
+    wm = guest.get("winemaker")
+    if not wm:
+        return ""
+
+    brand = (wm.get("brand") or "").strip()
+    code = wm.get("owner_code") or ""
+    # Show the brand only when it's a real, short label — placeholders and
+    # internal-notes values (caught upstream) are hidden behind the generic header.
+    brand_label = html.escape(brand) if brand and len(brand) <= 60 else ""
+
+    header_bits = ["&#127863; <strong>Wine Owner at The Vines</strong>"]
+    if brand_label:
+        header_bits.append(f"&mdash; Label: <strong>{brand_label}</strong>")
+    if code:
+        header_bits.append(f'<span style="color:#8a6a92;">({html.escape(str(code))})</span>')
+    rows = [" ".join(header_bits)]
+
+    research = wm.get("research") or {}
+    if research.get("found") and (research.get("summary") or research.get("style")):
+        body: list[str] = []
+        if research.get("summary"):
+            body.append(html.escape(research["summary"]))
+        detail = [
+            f"<strong>{label}:</strong> {html.escape(research[key])}"
+            for label, key in (
+                ("Style", "style"),
+                ("Blend", "blend"),
+                ("Tasting notes", "tasting_notes"),
+                ("Pairing", "food_pairing"),
+                ("Producer", "producer_background"),
+            )
+            if research.get(key)
+        ]
+        if detail:
+            body.append("<br>".join(detail))
+        ratings = research.get("ratings") or []
+        if ratings:
+            rendered = []
+            for r in ratings:
+                src = html.escape(str(r.get("source", "")))
+                score = html.escape(str(r.get("score", "")))
+                count = r.get("count")
+                tail = f" ({count} ratings)" if count else ""
+                rendered.append(f"{src}: {score}{html.escape(tail)}")
+            body.append('<span class="wm-ratings">' + " &nbsp;&bull;&nbsp; ".join(rendered) + "</span>")
+        sources = research.get("sources") or []
+        if sources:
+            body.append(
+                " &middot; ".join(
+                    f'<a href="{html.escape(u)}">source {i + 1}</a>'
+                    for i, u in enumerate(sources[:4])
+                )
+            )
+        rows.append("<br><br>".join(body))
+    else:
+        rows.append(
+            "<em>No public information found for this label &mdash; it may be a "
+            "small private-production wine not yet reviewed online.</em>"
+        )
+
+    return f'<div class="winemaker">{"<br><br>".join(rows)}</div>'
 
 
 def _guest_card(guest: dict) -> str:
@@ -185,6 +262,8 @@ def _guest_card(guest: dict) -> str:
             parts.append(f"<strong>Reservation Comments:</strong> {res_comments}")
         staff_notes_html = f'<div class="staff-notes">{"<br><br>".join(parts)}</div>'
 
+    winemaker_html = _winemaker_section(guest)
+
     return f"""
     <div class="card">
       <div class="card-header">
@@ -199,6 +278,7 @@ def _guest_card(guest: dict) -> str:
         </div>
       </div>
       {staff_notes_html}
+      {winemaker_html}
       {f'<p class="confidence-reason">{confidence_reason}</p>' if confidence_reason else ''}
       <p class="summary">{summary}</p>
       {f'<p class="summary-es">{summary_es}</p>' if summary_es else ''}
