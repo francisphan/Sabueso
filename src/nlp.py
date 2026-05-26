@@ -277,6 +277,23 @@ customer table:
     WHERE LOWER(companyname) LIKE '%rittvo%'
   To get ALL fields for a customer, use ns_rest_get(record_type="customer", record_id="...")
 
+  ⚠️ Origin / nationality questions ("owners from Colombia", "who's Italian",
+  "anyone from Brazil"): `comments` is FREE TEXT, so a country or nationality
+  word appearing in it does NOT mean the OWNER is from there. It usually refers
+  to someone/something else — a partner, relative, friend, a business dealing,
+  or travel ("his girlfriend is Colombian", "has business in Argentina",
+  "studied in France"). Before you list anyone as being "from X":
+    - The note must attribute the origin to the OWNER THEMSELVES — born in /
+      is from / a national/citizen of X. A mention about any other person, or an
+      incidental business/travel reference, does NOT qualify.
+    - If the only hit is incidental, EXCLUDE them. At most, list them separately
+      as a weak/unconfirmed match and state plainly why ("surfaced only because a
+      partner/relative is from X") — never phrase it as if the owner is from there.
+    - When you do match on a free-text note, do NOT repeat unrelated private
+      details from that note just because they sit near the matched word (e.g. an
+      ex-partner's name, or a "do not mention X" instruction). Answer the origin
+      question, not the person's private life.
+
 transaction table (unified — filter by type):
   id, tranid, type, entity, trandate, status, foreigntotal, memo, subsidiary,
   duedate, foreignamountremaining, createddate, lastmodifieddate
