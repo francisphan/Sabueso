@@ -214,6 +214,38 @@ TOOLS: list[dict] = [
             "required": ["label_text"],
         },
     },
+    # ── Wine public web research (sommelier) ───────────────────────────────
+    {
+        "name": "wine_research",
+        "description": (
+            "Research PUBLIC web information about a wine — tasting notes, "
+            "critic/Vivino ratings, grape blend, and producer background — using a "
+            "live web search. Use this AFTER wine_owner_lookup identifies a label "
+            "and the user wants public reviews/ratings/background, or whenever the "
+            "user names a wine and wants outside info. NOTE: many of The Vines' "
+            "wines are tiny private-label productions with little or no public "
+            "presence, so results may be sparse or empty — say so rather than "
+            "inventing detail."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "brand": {
+                    "type": "string",
+                    "description": "The wine brand/label name to research (e.g. 'Serca Gran Corte').",
+                },
+                "owner_name": {
+                    "type": "string",
+                    "description": "Optional owner/producer name, for disambiguation.",
+                },
+                "vintage": {
+                    "type": "string",
+                    "description": "Optional vintage year of interest (e.g. '2023').",
+                },
+            },
+            "required": ["brand"],
+        },
+    },
     # ── Cross-system lookups ──────────────────────────────────────────────
     {
         "name": "guest_360_profile",
