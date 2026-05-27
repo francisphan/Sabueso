@@ -10,6 +10,8 @@ import uuid
 
 import requests
 
+from tracing import get_correlation_id
+
 log = logging.getLogger(__name__)
 
 MCP_BASE_URL = os.getenv("MCP_BASE_URL", "http://localhost:8000")
@@ -29,6 +31,9 @@ def _headers() -> dict[str, str]:
         h["Authorization"] = f"Bearer {MCP_TOKEN}"
     if _session_id:
         h["Mcp-Session-Id"] = _session_id
+    cid = get_correlation_id()
+    if cid:
+        h["X-Correlation-ID"] = cid
     return h
 
 
@@ -115,7 +120,7 @@ def call_tool(tool_name: str, arguments: dict) -> dict | list | str:
     }
 
     # Arguments can carry guest PII — log at DEBUG, keep tool name at INFO.
-    log.info("MCP call: %s", tool_name)
+    log.info("MCP call: %s corr=%s", tool_name, get_correlation_id())
     log.debug("MCP call args: %s(%s)", tool_name, arguments)
 
     resp = requests.post(
