@@ -334,6 +334,18 @@ def _handle_pending(
     blocks = _render_confirmation_card(op)
     say(text=pc.summary, blocks=blocks, thread_ts=thread_ts)
 
+    # Record this turn in history NOW, while it's pending. Otherwise, if the user
+    # types a follow-up instead of clicking Confirm/Cancel, the next turn starts
+    # with no memory of it (history is only persisted on AGENT DONE or on a button
+    # click) — which reads as the bot having short-term memory. The outcome is
+    # appended later by execute_pending / cancel_pending.
+    _append_history(
+        _convo_key(user_id, channel, thread_ts),
+        text,
+        f"(I proposed a {pc.tool_name} action and asked you to confirm it. "
+        f"Pending your confirmation — {pc.summary})",
+    )
+
 
 def _render_confirmation_card(op: PendingOp) -> list[dict]:
     return [
@@ -494,9 +506,11 @@ def execute_pending(action_id: str, body: dict, client: "WebClient") -> None:
     except Exception:
         log.exception("Failed to post execute result")
 
+    # The request was already recorded as a pending turn in _handle_pending;
+    # record only the confirmation outcome here so the message isn't duplicated.
     _append_history(
         _convo_key(op.requester_user_id, op.channel, op.thread_ts),
-        op.user_message,
+        "(confirmed the pending action)",
         result_text,
     )
 
@@ -555,9 +569,10 @@ def cancel_pending(action_id: str, body: dict, client: "WebClient") -> None:
     except Exception:
         log.exception("Failed to update card on cancel")
 
+    # Outcome only — the request was already recorded as a pending turn.
     _append_history(
         _convo_key(op.requester_user_id, op.channel, op.thread_ts),
-        op.user_message,
+        "(cancelled the pending action)",
         "(cancelled)",
     )
 
