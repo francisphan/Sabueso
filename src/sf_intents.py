@@ -421,11 +421,8 @@ def create_opportunity_for_person(
     #    authenticated user — fine when everyone shares one SF account.
     sf_user_id = sf_identity.get_sf_user_id_for_slack(slack_user_id, slack_client)
 
-    # 8. Compute CloseDate.
+    # 8. Build the Slack-attributed description.
     today = date.today()
-    close_date = end_of_current_quarter(today)
-
-    # 9. Build Opportunity payload.
     description_parts = []
     if notes:
         description_parts.append(notes)
@@ -434,31 +431,34 @@ def create_opportunity_for_person(
     )
     description = "\n\n".join(description_parts)
 
-    opp_data: dict[str, Any] = {
-        "Name": f"{account_name} - {product}",
-        "StageName": "Deep Discovery",
-        "CloseDate": close_date.isoformat(),
-        "Description": description,
-    }
-    if sf_user_id:
-        opp_data["OwnerId"] = sf_user_id
-    if account_id:
-        opp_data["AccountId"] = account_id
-    if lead_source:
-        opp_data["LeadSource"] = lead_source
-
-    # 10. Create Opportunity.
+    # 9/10. Create the Opportunity via Agent B's create_opportunity composite.
+    # It owns the Account-link enforcement and the Name/StageName/CloseDate shape,
+    # so every consumer produces a valid, Account-linked Opp the same way (we pass
+    # the already-resolved account_id; the guard above guarantees it's present).
     try:
-        opp_result = call_tool("sf_create_record", {"object_name": "Opportunity", "data": opp_data})
+        opp_result = call_tool(
+            "create_opportunity",
+            {
+                "account_id": account_id,
+                "product": product,
+                "description": description,
+                "owner_id": sf_user_id or "",
+                "lead_source": lead_source or "",
+            },
+        )
     except Exception as exc:
         log.exception("Failed to create Opportunity for %s", account_name)
         return {"status": "create_failed", "error": str(exc)}
 
-    if not isinstance(opp_result, dict) or not opp_result.get("id") or not opp_result.get("success", True):
-        err = (opp_result.get("errors") or []) if isinstance(opp_result, dict) else []
-        return {"status": "create_failed", "error": str(err or opp_result)}
+    if not isinstance(opp_result, dict) or opp_result.get("status") != "ok" or not opp_result.get("opportunity_id"):
+        detail = (
+            opp_result.get("error") or opp_result.get("message")
+            if isinstance(opp_result, dict)
+            else opp_result
+        )
+        return {"status": "create_failed", "error": str(detail or opp_result)}
 
-    opp_id: str = opp_result["id"]
+    opp_id: str = opp_result["opportunity_id"]
 
     # 11. Create Tasks for each touch.
     touch_results: list[dict] = []
