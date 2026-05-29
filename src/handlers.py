@@ -663,6 +663,12 @@ def _format_failure(status: str | None, result: dict, action: str) -> str:
             stage = _escape_mrkdwn(c.get("stage") or c.get("StageName") or "?")
             lines.append(f"• *{name}* — {stage}")
         return "\n".join(lines)
+    if status == "needs_account":
+        return _escape_mrkdwn(result.get(
+            "message",
+            "That person has no Salesforce Account linked, so I can't create the "
+            "opportunity. Set up (or convert) their Account first.",
+        ))
     if status == "create_failed":
         err = _escape_mrkdwn(result.get("error", ""))
         return f"Failed to {action}: {err}".strip()

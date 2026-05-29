@@ -395,6 +395,27 @@ def create_opportunity_for_person(
     account_id = person.get("account_id")
     account_name = person["name"]
 
+    # 6b. An Opportunity must be linked to an Account. Record-triggered flows on
+    #     Opportunity insert ("Update Future Service", "Opp Sales Stages on
+    #     Account - Create") write back to the Account and throw unhandled faults,
+    #     rolling back the create, when there's no Account. A match with no Account
+    #     (a Lead, or an unconverted Contact) would produce an orphan Opp that SF
+    #     rejects — refuse here instead of creating one that's guaranteed to fail.
+    if not account_id:
+        return {
+            "status": "needs_account",
+            "person": {
+                "name": account_name,
+                "email": person.get("email", ""),
+                "source": person.get("source"),
+            },
+            "message": (
+                f"I found {account_name}, but they have no Salesforce Account "
+                "linked — creating an Opportunity would fail. Set up (or convert) "
+                "their Account first, then try again."
+            ),
+        }
+
     # 7. Resolve SF user identity (optional). If no per-Slack-user mapping
     #    exists, OwnerId is omitted and SF defaults to the API-connection's
     #    authenticated user — fine when everyone shares one SF account.
