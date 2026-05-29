@@ -63,6 +63,15 @@ _MAX_HISTORY = 20
 _METRICS_PATH = Path(os.getenv("METRICS_FILE", ".cache/metrics.jsonl"))
 _metrics_lock = threading.Lock()
 
+# When on, the raw human request text is embedded in each metrics record (for
+# mining real requests). Same flag that surfaces payloads in nlp.py's logs.
+# Off by default so guest PII stays out of the metrics file.
+_LOG_PAYLOADS = os.getenv("SABUESO_DEBUG_PAYLOADS", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 # Short-lived set of processed Slack event keys. Slack re-delivers an event if
 # our listener is slow (e.g. during an image download); without this guard the
 # same message gets processed twice — double answers, or two independently
@@ -277,6 +286,7 @@ def _process_message(
                 result=result,
                 unhandled_error=unhandled_error,
                 event="agent_turn",
+                message_text=text,
             )
 
     except Exception:
@@ -500,6 +510,7 @@ def execute_pending(action_id: str, body: dict, client: "WebClient") -> None:
         unhandled_error=error_type,
         event="write_confirmed",
         extras={"tool": op.tool_name, "action_id": op.action_id},
+        message_text=op.user_message,
     )
 
 
@@ -560,6 +571,7 @@ def cancel_pending(action_id: str, body: dict, client: "WebClient") -> None:
         unhandled_error=None,
         event="write_cancelled",
         extras={"tool": op.tool_name, "action_id": op.action_id},
+        message_text=op.user_message,
     )
 
 
@@ -679,6 +691,7 @@ def _record_metrics(
     unhandled_error: str | None,
     event: str = "agent_turn",
     extras: dict | None = None,
+    message_text: str | None = None,
 ) -> None:
     """Append one JSONL record per agent turn or write confirm/cancel."""
     record = {
@@ -687,6 +700,8 @@ def _record_metrics(
         "user_id": user_id,
         "channel": channel,
         "thread_ts": thread_ts,
+        # Correlation id ties this turn to agent-b's per-tool usage log.
+        "correlation_id": result.correlation_id if result else None,
         "message_chars": message_chars,
         "duration_ms": duration_ms,
         "success": unhandled_error is None and (result is None or result.error_type is None),
@@ -705,6 +720,8 @@ def _record_metrics(
         ),
         "error_type": unhandled_error or (result.error_type if result else None),
     }
+    if _LOG_PAYLOADS and message_text is not None:
+        record["request"] = message_text
     if extras:
         record.update(extras)
     try:
