@@ -16,7 +16,9 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import anthropic
 
@@ -24,6 +26,29 @@ from tools_catalog import TOOLS, WRITE_OPERATIONS, OPPORTUNITY_PRODUCTS, TOUCH_S
 from tracing import new_turn_id, set_correlation_id
 
 log = logging.getLogger(__name__)
+
+# The Vines is in Mendoza, Argentina (UTC-3 year-round, no DST).
+_VINES_TZ = "America/Argentina/Mendoza"
+
+
+def _today_note() -> str:
+    """A fresh per-turn reminder of the current date.
+
+    Without it the model guesses the year when a user names an absolute date
+    (e.g. it queried Check_In_Date__c = 2025-06-02 instead of 2026), making
+    specific-day lookups inconsistent with relative ones like "next week".
+    """
+    try:
+        now = datetime.now(ZoneInfo(_VINES_TZ))
+    except Exception:  # tzdata unavailable — Mendoza is UTC-3 year-round
+        now = datetime.now(timezone.utc) - timedelta(hours=3)
+    return (
+        f"Today's date is {now:%A, %Y-%m-%d} ({_VINES_TZ}). When the user names a "
+        "day or month without a year, assume the current year and the nearest "
+        "upcoming occurrence. Prefer relative SOQL date literals (TODAY, TOMORROW, "
+        "NEXT_N_DAYS:n, THIS_WEEK, NEXT_WEEK) over hard-coded dates; if you must use "
+        "an absolute date, use this year unless the user clearly means another."
+    )
 
 
 @dataclass
@@ -396,7 +421,11 @@ def run_agent(
             "type": "text",
             "text": SYSTEM_PROMPT,
             "cache_control": {"type": "ephemeral"},
-        }
+        },
+        # Fresh each turn (uncached, appended AFTER the cached block so the
+        # SYSTEM_PROMPT + tools prefix stays cached) so the model always knows
+        # the current date instead of guessing the year for absolute dates.
+        {"type": "text", "text": _today_note()},
     ]
 
     # Mint a correlation ID for this turn and propagate it to every MCP tool
