@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+import conversation_store
 import permissions
 import pending_ops
 import sf_intents
@@ -55,10 +56,8 @@ def _execute_tool(tool_name: str, arguments: dict):
         }
     return call_tool(tool_name, arguments)
 
-# Conversation history keyed by (user_id, channel, thread_ts).
-_conversations: dict[tuple[str, str, str], list[dict]] = {}
-_conversations_lock = threading.Lock()
-_MAX_HISTORY = 20
+# Conversation history (keyed by user/channel/thread) is persisted by
+# conversation_store so it survives restarts; see that module.
 
 _METRICS_PATH = Path(os.getenv("METRICS_FILE", ".cache/metrics.jsonl"))
 _metrics_lock = threading.Lock()
@@ -250,8 +249,7 @@ def _process_message(
         images = _extract_images(event, client)
 
         key = _convo_key(user_id, channel, thread_ts)
-        with _conversations_lock:
-            history = list(_conversations.get(key, []))
+        history = conversation_store.get_history(key)
 
         # History is stored text-only; record a placeholder when the turn was
         # just an image so follow-up context stays coherent and non-empty.
@@ -693,12 +691,9 @@ def _format_failure(status: str | None, result: dict, action: str) -> str:
 # ── Metrics + history helpers ───────────────────────────────────────────────
 
 def _append_history(key: tuple[str, str, str], user_text: str, assistant_text: str) -> None:
-    entries = build_history_from_agent_run(user_text, assistant_text)
-    with _conversations_lock:
-        hist = _conversations.setdefault(key, [])
-        hist.extend(entries)
-        if len(hist) > _MAX_HISTORY * 2:
-            _conversations[key] = hist[-_MAX_HISTORY * 2:]
+    conversation_store.append_history(
+        key, build_history_from_agent_run(user_text, assistant_text)
+    )
 
 
 def _record_metrics(
