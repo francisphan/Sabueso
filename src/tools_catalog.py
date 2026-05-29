@@ -282,6 +282,42 @@ TOOLS: list[dict] = [
             "required": ["email"],
         },
     },
+    {
+        "name": "person_brief",
+        "description": (
+            "Look up a person/owner by NAME or email and return ONE consolidated "
+            "profile: identity (home city/country), ownership (vineyard and/or "
+            "villa, with the CS rep), TVG membership, opportunities, and — by "
+            "default — stay history and financials. Prefer this for 'tell me about "
+            "<name>' and ownership questions ('is X an owner?', 'who is the CS rep "
+            "for <name>?', 'when did <name> purchase / how many acres?') instead of "
+            "chaining a search and separate lookups. An owner is someone who owns a "
+            "vineyard and/or a villa; the answer is driven by the account's Current "
+            "Services. If several people match a name (e.g. a couple), it returns "
+            "`candidates` to disambiguate — pick one and call again with their email."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "A person's name (e.g. 'Mirta Guzman', 'Barhorst') or email."
+                    ),
+                },
+                "deep": {
+                    "type": "boolean",
+                    "description": (
+                        "Include full cross-system enrichment (stay history, "
+                        "financials, marketing). Set false for a faster core "
+                        "profile when you only need one attribute. Default true."
+                    ),
+                    "default": True,
+                },
+            },
+            "required": ["query"],
+        },
+    },
     # ── Salesforce ────────────────────────────────────────────────────────
     {
         "name": "sf_soql_query",
