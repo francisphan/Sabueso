@@ -9,4 +9,5 @@ schedule
 slack-sdk
 slack-bolt
 reportlab
+redis
 pytest
