@@ -451,6 +451,15 @@ def create_opportunity_for_person(
         return {"status": "create_failed", "error": str(exc)}
 
     if not isinstance(opp_result, dict) or opp_result.get("status") != "ok" or not opp_result.get("opportunity_id"):
+        status = opp_result.get("status") if isinstance(opp_result, dict) else None
+        # Pass the composite's actionable statuses straight through so the rep
+        # gets a useful message/candidate list instead of a generic failure.
+        if status in ("needs_account", "ambiguous_account", "account_not_found"):
+            return {
+                k: v
+                for k, v in opp_result.items()
+                if k in ("status", "message", "candidates")
+            }
         detail = (
             opp_result.get("error") or opp_result.get("message")
             if isinstance(opp_result, dict)

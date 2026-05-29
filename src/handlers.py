@@ -335,13 +335,16 @@ def _handle_pending(
     # Record this turn in history NOW, while it's pending. Otherwise, if the user
     # types a follow-up instead of clicking Confirm/Cancel, the next turn starts
     # with no memory of it (history is only persisted on AGENT DONE or on a button
-    # click) — which reads as the bot having short-term memory. The outcome is
-    # appended later by execute_pending / cancel_pending.
+    # click). The outcome is appended later by execute_pending / cancel_pending IF
+    # a button is clicked. The wording below does NOT assert an open/blocking
+    # pending state, so an abandoned/expired/denied card that's never reconciled
+    # doesn't leave history implying a write is still awaiting confirmation.
     _append_history(
         _convo_key(user_id, channel, thread_ts),
         text,
-        f"(I proposed a {pc.tool_name} action and asked you to confirm it. "
-        f"Pending your confirmation — {pc.summary})",
+        f"(I showed a confirmation card for a {pc.tool_name} action. The user may "
+        f"click Confirm/Cancel or move on — if their next message isn't about it, "
+        f"just continue. Proposed: {pc.summary})",
     )
 
 
@@ -682,6 +685,20 @@ def _format_failure(status: str | None, result: dict, action: str) -> str:
             "That person has no Salesforce Account linked, so I can't create the "
             "opportunity. Set up (or convert) their Account first.",
         ))
+    if status == "account_not_found":
+        return _escape_mrkdwn(result.get(
+            "message", "I couldn't find that Salesforce account."
+        ))
+    if status == "ambiguous_account":
+        candidates = result.get("candidates", []) or []
+        lines = [_escape_mrkdwn(result.get(
+            "message", "Multiple accounts match — which one?"
+        ))]
+        for c in candidates:
+            name = _escape_mrkdwn(c.get("account_name") or c.get("name") or "?")
+            email = _escape_mrkdwn(c.get("email") or "(no email)")
+            lines.append(f"• *{name}* — {email}")
+        return "\n".join(lines)
     if status == "create_failed":
         err = _escape_mrkdwn(result.get("error", ""))
         return f"Failed to {action}: {err}".strip()
