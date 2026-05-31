@@ -583,4 +583,119 @@ TOOLS: list[dict] = [
             "required": ["prospect_id"],
         },
     },
+    # ── OPERA PMS (live hotel system, read-only) ─────────────────────────
+    # Live property-management data Salesforce lacks: arrivals, in-house guests,
+    # rooms, guest profile notes/allergies/preferences, and full stay history.
+    # Flow: opera_search_profiles (email/name) -> NAME_ID -> notes / stay history.
+    {
+        "name": "opera_search_profiles",
+        "description": (
+            "Search OPERA PMS guest profiles by email and/or name. OPERA is The "
+            "Vines' live hotel system — use it for reservation, room, stay, and "
+            "guest-preference data Salesforce doesn't have. Returns each profile's "
+            "OPERA NAME_ID, which the other opera_* profile tools require. Provide "
+            "at least one of email, last_name, or first_name."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {"type": "string", "description": "Email — exact match, case-insensitive."},
+                "last_name": {"type": "string", "description": "Last-name prefix, case-insensitive."},
+                "first_name": {"type": "string", "description": "First-name prefix, case-insensitive."},
+                "limit": {"type": "integer", "description": "Max rows (default 25)."},
+            },
+        },
+    },
+    {
+        "name": "opera_get_profile_notes",
+        "description": (
+            "Return an OPERA guest's profile notes and comments — preferences, "
+            "allergies, incidents, biographical notes. Requires the OPERA NAME_ID "
+            "from opera_search_profiles."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name_id": {"type": "integer", "description": "OPERA NAME_ID (from opera_search_profiles)."},
+            },
+            "required": ["name_id"],
+        },
+    },
+    {
+        "name": "opera_get_stay_history",
+        "description": (
+            "Return all reservations (past and future) for an OPERA guest, ordered "
+            "by check-in descending. Requires the OPERA NAME_ID from "
+            "opera_search_profiles."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name_id": {"type": "integer", "description": "OPERA NAME_ID (from opera_search_profiles)."},
+                "limit": {"type": "integer", "description": "Max stays (default 50)."},
+            },
+            "required": ["name_id"],
+        },
+    },
+    {
+        "name": "opera_list_arrivals",
+        "description": (
+            "List guests arriving (checking in) at The Vines on a given date. "
+            "Returns name, email, country, room, ETA, status, and reservation IDs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "Arrival date as YYYY-MM-DD."},
+                "include_cancelled": {"type": "boolean", "description": "Include cancelled reservations (default false)."},
+            },
+            "required": ["date"],
+        },
+    },
+    {
+        "name": "opera_list_in_house",
+        "description": (
+            "List guests in-house at The Vines on a given date (checked in before "
+            "the date and not yet checked out)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "Target date as YYYY-MM-DD."},
+            },
+            "required": ["date"],
+        },
+    },
+    {
+        "name": "opera_get_opera_schema",
+        "description": (
+            "Return curated OPERA table schemas (fields, filters, example SQL). "
+            "Call this BEFORE opera_sql_query so you use correct table/column names "
+            "and the VINES filters (RESORT='VINES', NAME_TYPE='D')."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tables": {"type": "string", "description": "Comma-separated table names (e.g. 'NAME,RESERVATION_NAME'). Empty = all curated tables + tips."},
+            },
+        },
+    },
+    {
+        "name": "opera_sql_query",
+        "description": (
+            "Run a read-only SQL SELECT against the OPERA Oracle database for live "
+            "PMS data not covered by the other opera_* tools. Only SELECT/WITH is "
+            "allowed. Call opera_get_opera_schema first for table/column names, and "
+            "always filter reservation tables to RESORT='VINES'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string", "description": "A single SELECT or WITH statement. Use :name bind placeholders."},
+                "binds": {"type": "object", "description": "Optional named bind parameters, e.g. {\"name_id\": 12345}."},
+                "limit": {"type": "integer", "description": "Max rows (default 500, cap 5000)."},
+            },
+            "required": ["sql"],
+        },
+    },
 ]
