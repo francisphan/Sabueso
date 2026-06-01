@@ -14,6 +14,25 @@ Sabueso automatically generates a guest intelligence briefing for [The Vines of 
 
 ---
 
+## Slack Bot
+
+Sabueso also runs an **interactive Slack bot** (`slack_bot.py`, Socket Mode). Staff
+ask ad-hoc questions about guests and customers in Slack, and the bot answers by
+calling **agent-b**'s MCP tools across four systems:
+
+- **Salesforce** — contacts, accounts, opportunities, the SF guest record
+- **NetSuite** — invoices, balances, financials
+- **Pardot** — marketing engagement
+- **OPERA PMS** (read-only, live) — reservations, stays, today's arrivals / in-house,
+  room assignments, and guest profile notes (allergies, preferences)
+
+The bot's LLM (Claude) is given a curated tool catalog (`tools_catalog.py`); read
+tools execute directly, write tools require a Slack-button confirmation. It talks
+to agent-b over streamable-HTTP (`mcp_client.py`, `MCP_BASE_URL` + `MCP_WRITE_TOKEN`);
+conversation state is kept in Redis. Deployed on Railway.
+
+---
+
 ## Project Structure
 
 ```
@@ -24,6 +43,11 @@ src/
   report_builder.py     HTML email renderer
   email_sender.py       Gmail API sender
   scheduler.py          Pipeline orchestration (fetch → profile → build → send)
+  slack_bot.py          Interactive Slack bot (Socket Mode)
+  handlers.py           Slack event handling + tool execution
+  nlp.py                Agent loop (Claude) + system prompt
+  mcp_client.py         Streamable-HTTP client to agent-b's MCP tools
+  tools_catalog.py      Tool definitions exposed to the bot's LLM (SF/NS/Pardot/OPERA)
 scripts/
   get_salesforce_token.py   One-time OAuth flow to get SF_REFRESH_TOKEN
   get_gmail_token.py        One-time OAuth flow to get GMAIL_REFRESH_TOKEN
