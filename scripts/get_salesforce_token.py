@@ -70,7 +70,12 @@ def main():
         f"?response_type=code"
         f"&client_id={urllib.parse.quote(CLIENT_ID)}"
         f"&redirect_uri={urllib.parse.quote(REDIRECT_URI)}"
-        f"&scope=full+offline_access"
+        # pardot_api must be requested EXPLICITLY — Salesforce's "full" scope
+        # does not include it, and without it every Pardot v5 call 403s with
+        # err code 184 "Invalid scope". The connected app's OAuth settings must
+        # also list "Access Pardot services (pardot_api)" or the authorize
+        # request itself will be rejected.
+        f"&scope=full+pardot_api+offline_access"
     )
 
     server = HTTPServer(("localhost", PORT), CallbackHandler)

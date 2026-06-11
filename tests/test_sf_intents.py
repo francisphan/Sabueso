@@ -368,12 +368,10 @@ class TestCreateOpportunityForPerson:
         def side_effect(tool, params):
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                obj = params.get("object_name")
-                if obj == "Opportunity":
-                    return {"id": OPP_ID, "success": True}
-                if obj == "Task":
-                    return {"id": next(task_ids), "success": True}
+            if tool == "create_opportunity":
+                return {"status": "ok", "opportunity_id": OPP_ID}
+            if tool == "sf_create_record" and params.get("object_name") == "Task":
+                return {"id": next(task_ids), "success": True}
             return {}
 
         monkeypatch.setattr(sf_intents, "call_tool", MagicMock(side_effect=side_effect))
@@ -493,17 +491,18 @@ class TestCreateOpportunityForPerson:
     # SF identity failure
     # -----------------------------------------------------------------------
 
-    def test_no_sf_identity_omits_owner_id(self, monkeypatch, mock_sf_identity_none):
-        """Missing Slack→SF user mapping is non-fatal — opp is created without
-        OwnerId so SF defaults to the API-connection's authenticated user."""
+    def test_no_sf_identity_sends_empty_owner_id(self, monkeypatch, mock_sf_identity_none):
+        """Missing Slack→SF user mapping is non-fatal — the composite is called
+        with an empty owner_id so SF defaults to the API-connection's
+        authenticated user."""
         calls = []
 
         def side_effect(tool, params):
             calls.append((tool, params))
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                return {"id": OPP_ID, "success": True}
+            if tool == "create_opportunity":
+                return {"status": "ok", "opportunity_id": OPP_ID}
             return {}
 
         monkeypatch.setattr(sf_intents, "call_tool", MagicMock(side_effect=side_effect))
@@ -517,22 +516,23 @@ class TestCreateOpportunityForPerson:
 
         assert result["status"] == "ok"
         opp_create_call = next(
-            (params for tool, params in calls if tool == "sf_create_record" and params["object_name"] == "Opportunity"),
+            (params for tool, params in calls if tool == "create_opportunity"),
             None,
         )
         assert opp_create_call is not None
-        assert "OwnerId" not in opp_create_call["data"]
+        assert opp_create_call["owner_id"] == ""
 
     # -----------------------------------------------------------------------
     # Opportunity creation failures
     # -----------------------------------------------------------------------
 
     def test_create_failed_when_opp_returns_no_id(self, monkeypatch, mock_sf_identity):
+        """Composite reports status=ok but no opportunity_id → create_failed."""
         def side_effect(tool, params):
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                return {"id": None, "success": False, "errors": ["REQUIRED_FIELD_MISSING"]}
+            if tool == "create_opportunity":
+                return {"status": "ok"}
             return {}
 
         monkeypatch.setattr(sf_intents, "call_tool", MagicMock(side_effect=side_effect))
@@ -546,12 +546,14 @@ class TestCreateOpportunityForPerson:
 
         assert result["status"] == "create_failed"
 
-    def test_create_failed_when_opp_success_false(self, monkeypatch, mock_sf_identity):
+    def test_create_failed_when_opp_status_not_ok(self, monkeypatch, mock_sf_identity):
+        """Composite reports a non-ok status (one NOT in the pass-through set
+        needs_account/ambiguous_account/account_not_found) → create_failed."""
         def side_effect(tool, params):
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                return {"id": "006abc", "success": False, "errors": ["SOME_ERROR"]}
+            if tool == "create_opportunity":
+                return {"status": "error", "error": "SOME_ERROR"}
             return {}
 
         monkeypatch.setattr(sf_intents, "call_tool", MagicMock(side_effect=side_effect))
@@ -564,6 +566,7 @@ class TestCreateOpportunityForPerson:
         )
 
         assert result["status"] == "create_failed"
+        assert "SOME_ERROR" in result["error"]
 
     def test_create_failed_when_opp_raises(self, monkeypatch, mock_sf_identity):
         def side_effect(tool, params):
@@ -597,15 +600,13 @@ class TestCreateOpportunityForPerson:
             nonlocal task_call_count
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                obj = params.get("object_name")
-                if obj == "Opportunity":
-                    return {"id": OPP_ID, "success": True}
-                if obj == "Task":
-                    task_call_count += 1
-                    if task_call_count == 1:
-                        return {"id": TASK_ID_1, "success": True}
-                    raise RuntimeError("Task creation failed")
+            if tool == "create_opportunity":
+                return {"status": "ok", "opportunity_id": OPP_ID}
+            if tool == "sf_create_record" and params.get("object_name") == "Task":
+                task_call_count += 1
+                if task_call_count == 1:
+                    return {"id": TASK_ID_1, "success": True}
+                raise RuntimeError("Task creation failed")
             return {}
 
         call_tool_mock = MagicMock(side_effect=side_effect)
@@ -646,20 +647,21 @@ class TestCreateOpportunityForPerson:
         assert touches_in_audit[1]["ok"] is False
 
     # -----------------------------------------------------------------------
-    # Payload assertions: description marker, owner injection, CloseDate
+    # Payload assertions: description marker, owner injection, composite params
     # -----------------------------------------------------------------------
 
     def test_description_contains_created_marker(self, monkeypatch, mock_audit, mock_sf_identity):
-        """Description in Opp payload contains 'Created via Sabueso by <@USER> on DATE'."""
+        """description passed to create_opportunity contains
+        'Created via Sabueso by <@USER> on DATE'."""
         captured = {}
 
         def side_effect(tool, params):
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                if params.get("object_name") == "Opportunity":
-                    captured["data"] = params.get("data", {})
-                    return {"id": OPP_ID, "success": True}
+            if tool == "create_opportunity":
+                captured["params"] = params
+                return {"status": "ok", "opportunity_id": OPP_ID}
+            if tool == "sf_create_record" and params.get("object_name") == "Task":
                 return {"id": TASK_ID_1, "success": True}
             return {}
 
@@ -673,23 +675,23 @@ class TestCreateOpportunityForPerson:
             notes="Meeting at the vineyard",
         )
 
-        desc = captured["data"].get("Description", "")
+        desc = captured["params"].get("description", "")
         today_str = date.today().isoformat()
         assert f"Created via Sabueso by <@{SLACK_USER_ID}> on {today_str}" in desc
         # Notes should also appear
         assert "Meeting at the vineyard" in desc
 
     def test_owner_id_equals_sf_identity_not_llm(self, monkeypatch, mock_audit, mock_sf_identity):
-        """OwnerId in Opp payload must equal the resolved SF user ID."""
+        """owner_id passed to create_opportunity must equal the resolved SF user ID."""
         captured = {}
 
         def side_effect(tool, params):
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                if params.get("object_name") == "Opportunity":
-                    captured["data"] = params.get("data", {})
-                    return {"id": OPP_ID, "success": True}
+            if tool == "create_opportunity":
+                captured["params"] = params
+                return {"status": "ok", "opportunity_id": OPP_ID}
+            if tool == "sf_create_record" and params.get("object_name") == "Task":
                 return {"id": TASK_ID_1, "success": True}
             return {}
 
@@ -702,21 +704,25 @@ class TestCreateOpportunityForPerson:
             product=VALID_PRODUCT,
         )
 
-        assert captured["data"]["OwnerId"] == SF_USER_ID
+        assert captured["params"]["owner_id"] == SF_USER_ID
 
-    def test_close_date_equals_end_of_current_quarter(
+    def test_close_date_owned_by_composite_not_client(
         self, monkeypatch, mock_audit, mock_sf_identity
     ):
-        """CloseDate in Opp payload equals end_of_current_quarter(date.today())."""
+        """CloseDate is now owned by Agent B's create_opportunity composite, so
+        the client can't assert its value (the old end-of-quarter check moved
+        server-side). Instead, assert what the client IS responsible for: it
+        sends the resolved account_id and product, and does NOT try to set a
+        CloseDate itself."""
         captured = {}
 
         def side_effect(tool, params):
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                if params.get("object_name") == "Opportunity":
-                    captured["data"] = params.get("data", {})
-                    return {"id": OPP_ID, "success": True}
+            if tool == "create_opportunity":
+                captured["params"] = params
+                return {"status": "ok", "opportunity_id": OPP_ID}
+            if tool == "sf_create_record" and params.get("object_name") == "Task":
                 return {"id": TASK_ID_1, "success": True}
             return {}
 
@@ -729,8 +735,10 @@ class TestCreateOpportunityForPerson:
             product=VALID_PRODUCT,
         )
 
-        expected = end_of_current_quarter(date.today()).isoformat()
-        assert captured["data"]["CloseDate"] == expected
+        assert captured["params"]["account_id"] == ACCOUNT_ID
+        assert captured["params"]["product"] == VALID_PRODUCT
+        assert "CloseDate" not in captured["params"]
+        assert "close_date" not in captured["params"]
 
     def test_task_owner_id_matches_sf_identity(self, monkeypatch, mock_audit, mock_sf_identity):
         """OwnerId on each Task also equals SF user ID."""
@@ -739,13 +747,11 @@ class TestCreateOpportunityForPerson:
         def side_effect(tool, params):
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                obj = params.get("object_name")
-                if obj == "Opportunity":
-                    return {"id": OPP_ID, "success": True}
-                if obj == "Task":
-                    task_owners.append(params.get("data", {}).get("OwnerId"))
-                    return {"id": TASK_ID_1, "success": True}
+            if tool == "create_opportunity":
+                return {"status": "ok", "opportunity_id": OPP_ID}
+            if tool == "sf_create_record" and params.get("object_name") == "Task":
+                task_owners.append(params.get("data", {}).get("OwnerId"))
+                return {"id": TASK_ID_1, "success": True}
             return {}
 
         monkeypatch.setattr(sf_intents, "call_tool", MagicMock(side_effect=side_effect))
@@ -765,8 +771,8 @@ class TestCreateOpportunityForPerson:
         def side_effect(tool, params):
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                return {"id": OPP_ID, "success": True}
+            if tool == "create_opportunity":
+                return {"status": "ok", "opportunity_id": OPP_ID}
             return {}
 
         monkeypatch.setattr(sf_intents, "call_tool", MagicMock(side_effect=side_effect))
@@ -785,9 +791,9 @@ class TestCreateOpportunityForPerson:
         def side_effect(tool, params):
             if tool == "sf_search":
                 return _sosl_one_person()
-            if tool == "sf_create_record":
-                if params.get("object_name") == "Opportunity":
-                    return {"id": OPP_ID, "success": True}
+            if tool == "create_opportunity":
+                return {"status": "ok", "opportunity_id": OPP_ID}
+            if tool == "sf_create_record" and params.get("object_name") == "Task":
                 return {"id": TASK_ID_1, "success": True}
             return {}
 

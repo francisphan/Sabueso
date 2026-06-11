@@ -7,6 +7,8 @@ tool definition (JSON-schema style).
 
 from __future__ import annotations
 
+import os
+
 # ---------------------------------------------------------------------------
 # Write-operation names — triggers confirmation flow before execution.
 # ---------------------------------------------------------------------------
@@ -583,10 +585,18 @@ TOOLS: list[dict] = [
             "required": ["prospect_id"],
         },
     },
-    # ── OPERA PMS (live hotel system, read-only) ─────────────────────────
-    # Live property-management data Salesforce lacks: arrivals, in-house guests,
-    # rooms, guest profile notes/allergies/preferences, and full stay history.
-    # Flow: opera_search_profiles (email/name) -> NAME_ID -> notes / stay history.
+]
+
+# ── OPERA PMS (live hotel system, read-only) ─────────────────────────────
+# Live property-management data Salesforce lacks: arrivals, in-house guests,
+# rooms, guest profile notes/allergies/preferences, and full stay history.
+# Flow: opera_search_profiles (email/name) -> NAME_ID -> notes / stay history.
+#
+# Kept OUT of TOOLS unless OPERA_TOOLS_ENABLED is on (same flag/parsing as
+# agent-b, which registers the opera_* MCP tools behind it). When the server
+# side is off, advertising these to the model just produces "Unknown tool"
+# errors — observed daily in prod logs.
+OPERA_TOOLS: list[dict] = [
     {
         "name": "opera_search_profiles",
         "description": (
@@ -699,3 +709,11 @@ TOOLS: list[dict] = [
         },
     },
 ]
+
+
+def _opera_enabled() -> bool:
+    return os.getenv("OPERA_TOOLS_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
+
+if _opera_enabled():
+    TOOLS.extend(OPERA_TOOLS)

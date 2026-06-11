@@ -22,7 +22,13 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 
-from tools_catalog import TOOLS, WRITE_OPERATIONS, OPPORTUNITY_PRODUCTS, TOUCH_SUBJECTS
+from tools_catalog import (
+    TOOLS,
+    WRITE_OPERATIONS,
+    OPPORTUNITY_PRODUCTS,
+    TOUCH_SUBJECTS,
+    _opera_enabled,
+)
 from tracing import new_turn_id, set_correlation_id
 
 log = logging.getLogger(__name__)
@@ -94,6 +100,25 @@ _PAYLOAD_LEVEL = (
     if os.getenv("SABUESO_DEBUG_PAYLOADS", "").strip().lower() in ("1", "true", "yes")
     else logging.DEBUG
 )
+
+# OPERA guidance is stripped from the prompt when the opera_* tools aren't
+# advertised (OPERA_TOOLS_ENABLED off — see tools_catalog), so the model is
+# never instructed to call tools it doesn't have.
+_OPERA_OWNERSHIP_BULLET = """\
+- **OPERA PMS** = the live hotel system. Real-time reservations, today's arrivals
+  and in-house guests, room/villa assignments and ETAs, plus guest profile notes
+  (allergies, preferences, incidents) and full stay history. Use OPERA for what is
+  happening on-property *now* and for operational guest details Salesforce lacks.
+"""
+
+_OPERA_TOOL_SELECTION_BULLET = """\
+- For LIVE reservations, today's arrivals/in-house, room assignments, or a guest's
+  allergies/preferences/notes and stay history → OPERA. Find the guest with
+  opera_search_profiles (email or name) to get their NAME_ID, then
+  opera_get_profile_notes / opera_get_stay_history. Use opera_list_arrivals /
+  opera_list_in_house for a given date. For anything else, call
+  opera_get_opera_schema first, then opera_sql_query (read-only, RESORT='VINES').
+"""
 
 SYSTEM_PROMPT = """\
 You are Sabueso, a data bloodhound embedded in Slack for The Vines of Mendoza,
@@ -371,6 +396,12 @@ vendor table:
 employee table:
   id, entityid, firstname, lastname, email, title, isinactive
 """
+
+if not _opera_enabled():
+    for _block in (_OPERA_OWNERSHIP_BULLET, _OPERA_TOOL_SELECTION_BULLET):
+        assert _block in SYSTEM_PROMPT  # keep the constants in sync with the prompt
+        SYSTEM_PROMPT = SYSTEM_PROMPT.replace(_block, "")
+
 
 
 # ---------------------------------------------------------------------------
