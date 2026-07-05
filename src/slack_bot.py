@@ -25,6 +25,7 @@ from handlers import (
     handle_direct_message,
     handle_mention,
 )
+from log_setup import setup_logging
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ def _create_app() -> App:
 
 def start_bot() -> None:
     """Start the Slack bot in Socket Mode (blocks forever)."""
+    setup_logging()
     app = _create_app()
     handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
     log.info("Sabueso starting (Socket Mode)…")

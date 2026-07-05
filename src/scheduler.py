@@ -9,26 +9,11 @@ from pathlib import Path
 import schedule
 
 from salesforce_client import fetch_upcoming_guests
-from gemini_profiler import current_guest, profile_guests
+from gemini_profiler import profile_guests
 from report_builder import build_html
 from email_sender import send_report
+from log_setup import setup_logging
 
-
-class _GuestTagFilter(logging.Filter):
-    """Inject the current guest name (from contextvars) into every log record."""
-    def filter(self, record):
-        guest = current_guest.get("")
-        record.guest_tag = f"[{guest}] " if guest else ""
-        return True
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(guest_tag)s%(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-for _h in logging.root.handlers:
-    _h.addFilter(_GuestTagFilter())
 log = logging.getLogger(__name__)
 
 
@@ -45,6 +30,7 @@ def run_report(
                    save each run's profile results as run_{run_id}_profiles.json.
         run_id: Label for this run when saving cached profiles (e.g. 1, 2, 3).
     """
+    setup_logging()
     log.info("Starting guest report pipeline…")
 
     # Fetch guests — reuse cached list if available (avoids redundant Salesforce calls)
@@ -94,6 +80,7 @@ def run_report(
 
 def start_scheduler() -> None:
     """Block forever, running the report every Monday and Thursday at 08:00."""
+    setup_logging()
     schedule.every().monday.at("08:00").do(run_report)
     schedule.every().thursday.at("08:00").do(run_report)
 
