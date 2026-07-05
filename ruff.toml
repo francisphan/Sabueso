@@ -1,0 +1,18 @@
+# Ruff configuration. See https://docs.astral.sh/ruff/configuration/
+# Matches the Python version used in CI (see .github/workflows).
+target-version = "py311"
+line-length = 120
+
+[lint]
+# Ruff's default rule set: pyflakes (F) plus the pycodestyle error subset.
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# nlp.py's unused imports are being removed on a separate branch; ignore here
+# to avoid cross-branch churn.
+"src/nlp.py" = ["F401"]
+# main.py loads dotenv before importing app modules on purpose; the import
+# ordering (E402) is intentional and owned by another branch.
+"src/main.py" = ["E402"]
+# One-time OAuth setup scripts run sys.path / dotenv setup before their imports.
+"scripts/*" = ["E402"]

@@ -7,7 +7,6 @@ Usage:
     python scripts/get_gmail_token.py
 """
 
-import json
 import sys
 from pathlib import Path
 

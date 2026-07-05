@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -171,7 +171,6 @@ class TestFullFlow:
         get_sf_user_id_for_slack(SLACK_USER_ID, slack_client)
 
         call_tool_mock.assert_called_once()
-        _name, kwargs_or_args = call_tool_mock.call_args[0], call_tool_mock.call_args
         # Extract the query string from the call
         call_args = call_tool_mock.call_args
         query_str = call_args[0][1]["query_str"]

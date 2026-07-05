@@ -337,7 +337,6 @@ def _score_photo_candidate(
         and w not in _PHOTO_NOISE_WORDS        # skip photo jargon
     ]
     if len(name_tokens) >= 2:
-        matching = [t for t in name_tokens if t in name_parts]
         non_matching = [t for t in name_tokens if t not in name_parts]
         # If any name-like tokens don't match the guest, this is likely a
         # different person (e.g. shares a last name but different first name,

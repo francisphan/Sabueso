@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 import permissions
 from permissions import (
     Role,
-    AclEntry,
     add_role,
     add_user,
     bulk_add_users,
@@ -725,7 +723,7 @@ class TestMultiRoleAdminCommands:
         assert get_roles(MULTI_ID) == [Role.SALES_REP, Role.READ_ONLY]
 
     def test_add_with_whitespace_in_comma_list(self):
-        result = parse_admin_command(
+        parse_admin_command(
             f"!access add <@{MULTI_ID}> sales_rep, read_only", ADMIN_ID
         )
         assert get_roles(MULTI_ID) == [Role.SALES_REP, Role.READ_ONLY]
@@ -765,6 +763,6 @@ class TestMultiRoleAdminCommands:
         set_user_roles(MULTI_ID, [Role.SALES_REP, Role.READ_ONLY])
         result = list_users()
         # Both role names appear together on the same line for MULTI_ID.
-        line = next(l for l in result.splitlines() if MULTI_ID in l)
+        line = next(ln for ln in result.splitlines() if MULTI_ID in ln)
         assert "`sales_rep`" in line
         assert "`read_only`" in line
