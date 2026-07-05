@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -100,6 +101,23 @@ _PAYLOAD_LEVEL = (
     if os.getenv("SABUESO_DEBUG_PAYLOADS", "").strip().lower() in ("1", "true", "yes")
     else logging.DEBUG
 )
+
+# One shared bound for error text: what the failure WARNING logs and what the
+# model receives must stay the same size, or a truncated-error bug report can't
+# be reproduced from the logs.
+_ERR_CLIP = 300
+
+_EMAIL_RE = re.compile(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@")
+
+
+def _mask_emails(text: str) -> str:
+    """Mask the local part of any email address (jane.doe@x.com -> j***@x.com).
+
+    The failure WARNING in run_agent is deliberately ungated (unlike the
+    DEBUG-gated payload lines), and for lookup tools the arguments ARE the
+    guest's email — so mask before logging.
+    """
+    return _EMAIL_RE.sub(r"\1***@", text)
 
 # OPERA guidance is stripped from the prompt when the opera_* tools aren't
 # advertised (OPERA_TOOLS_ENABLED off — see tools_catalog), so the model is
@@ -497,7 +515,7 @@ def run_agent(
     for step in range(MAX_STEPS):
         result.steps = step + 1
         try:
-            log.info("--- Step %d: sending %d messages to Claude (%s) ---", step, len(messages), MODEL)
+            log.info("--- [corr=%s] Step %d: sending %d messages to Claude (%s) ---", turn_id, step, len(messages), MODEL)
             response = client.messages.create(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
@@ -521,9 +539,9 @@ def run_agent(
             if block.type == "text":
                 log.log(_PAYLOAD_LEVEL, "  Step %d block[%d] TEXT: %s", step, i, block.text[:1000])
             elif block.type == "tool_use":
-                log.info("  Step %d block[%d] TOOL_USE: %s", step, i, block.name)
+                log.info("  [corr=%s] Step %d block[%d] TOOL_USE: %s", turn_id, step, i, block.name)
                 log.log(_PAYLOAD_LEVEL, "    args: %s", json.dumps(block.input, default=str)[:500])
-        log.info("  Step %d stop_reason=%s usage=%s", step, response.stop_reason, {
+        log.info("  [corr=%s] Step %d stop_reason=%s usage=%s", turn_id, step, response.stop_reason, {
             "input": usage.input_tokens,
             "output": usage.output_tokens,
             "cache_read": getattr(usage, "cache_read_input_tokens", 0),
@@ -538,7 +556,13 @@ def run_agent(
         tool_calls = [b for b in response.content if b.type == "tool_use"]
         if not tool_calls:
             result.text = _extract_text(response)
-            log.info("=== AGENT DONE (no tools) === corr=%s steps=%d final_len=%d", turn_id, result.steps, len(result.text))
+            # No tool_use and stop_reason != end_turn — a refusal or a
+            # max_tokens cutoff mid-text. Logging stop_reason distinguishes the
+            # two (they need different follow-up) instead of looking identical.
+            log.info(
+                "=== AGENT DONE (no tools) === corr=%s stop_reason=%s steps=%d final_len=%d",
+                turn_id, response.stop_reason, result.steps, len(result.text),
+            )
             return result
 
         # Halt the loop if any tool in this batch is a write — surface as a
@@ -571,7 +595,7 @@ def run_agent(
             arguments = tool_call.input or {}
             result.tool_calls.append(tool_name)
 
-            log.info("  Executing tool: %s", tool_name)
+            log.info("  [corr=%s] Step %d executing tool: %s", turn_id, step, tool_name)
             log.log(_PAYLOAD_LEVEL, "    args: %s", json.dumps(arguments, default=str))
 
             try:
@@ -579,15 +603,41 @@ def run_agent(
                 result_str = json.dumps(tool_output, default=str)
                 if len(result_str) > 80_000:
                     result_str = result_str[:80_000] + "\n... [truncated]"
-                log.info("  Tool %s returned %d chars", tool_name, len(result_str))
+                log.info("  [corr=%s] Step %d Tool %s returned %d chars", turn_id, step, tool_name, len(result_str))
                 log.log(_PAYLOAD_LEVEL, "    result: %.1000s", result_str)
             except Exception as e:
-                log.error("  Tool %s FAILED: %s", tool_name, e, exc_info=True)
+                log.error("  [corr=%s] Step %d Tool %s FAILED: %s", turn_id, step, tool_name, e, exc_info=True)
                 err_type = type(e).__name__
+                # Hand Claude the real (clipped) error instead of a generic
+                # "logged for investigation" string, so it can adapt — fix its
+                # SuiteQL, back off, or stop — rather than re-issue the same
+                # failing call. str(e) is an exception / MCP protocol message
+                # (e.g. mcp_client's ValueError), not raw tool output, so it
+                # carries far less PII risk than the full payload.
                 result_str = json.dumps({
-                    "error": f"Tool {tool_name} failed ({err_type}). "
-                             "The error has been logged for investigation."
+                    "error": f"Tool {tool_name} failed ({err_type}): {str(e)[:_ERR_CLIP]}"
                 })
+            else:
+                # Tools report failure as a {"error": ...} dict (or a
+                # single-element [{"error": ...}] list) rather than raising, so
+                # a failed call looks identical to a success at INFO and the
+                # model retries it blind. Surface it at WARNING so the failure
+                # is visible without SABUESO_DEBUG_PAYLOADS. Deliberately
+                # ungated, but emails are masked and only the truncated error +
+                # args are carried (never the full payload, which stays DEBUG
+                # above). Defensive try: diagnostics must never turn a
+                # successful tool call into a reported failure.
+                try:
+                    tool_err = _extract_tool_error(tool_output)
+                    if tool_err is not None:
+                        log.warning(
+                            "  [corr=%s] Step %d Tool %s returned an error: %s | args=%s",
+                            turn_id, step, tool_name,
+                            _mask_emails(str(tool_err)[:_ERR_CLIP]),
+                            _mask_emails(json.dumps(arguments, default=str)[:_ERR_CLIP]),
+                        )
+                except Exception:  # pragma: no cover - diagnostics only
+                    log.debug("    error-detection failed", exc_info=True)
 
             tool_results.append({
                 "type": "tool_result",
@@ -598,10 +648,23 @@ def run_agent(
         messages.append({"role": "user", "content": tool_results})
 
     result.max_steps_hit = True
-    log.warning("=== AGENT HIT MAX STEPS (%d) === corr=%s", MAX_STEPS, turn_id)
-    result.text = (
-        _extract_text(response) if response is not None else ""
-    ) or "I got a bit lost sniffing around. Could you try a simpler question?"
+    stop_reason = response.stop_reason if response is not None else None
+    log.warning(
+        "=== AGENT HIT MAX STEPS (%d) === corr=%s stop_reason=%s steps=%d",
+        MAX_STEPS, turn_id, stop_reason, result.steps,
+    )
+    # Prefer any real text the model produced on the last step; otherwise send
+    # the max-steps apology. We extract raw text here rather than via
+    # _extract_text because that helper substitutes its own non-empty
+    # placeholder ("I couldn't find anything to report."), which would always
+    # win the `or` and leave this fallback dead — the original bug.
+    partial = ""
+    if response is not None:
+        partial = "\n".join(b.text for b in response.content if b.type == "text").strip()
+    result.text = partial or (
+        "I sniffed down every trail I could within the steps I'm allowed and still "
+        "couldn't pick up the scent. Could you narrow it down or try a simpler question?"
+    )
     return result
 
 
@@ -609,6 +672,28 @@ def _extract_text(response: anthropic.types.Message) -> str:
     """Extract text content from a Claude response."""
     parts = [b.text for b in response.content if b.type == "text"]
     return "\n".join(parts).strip() or "I couldn't find anything to report."
+
+
+def _extract_tool_error(tool_output: Any) -> str | None:
+    """Return a tool result's error message, or None if it isn't an error.
+
+    Agent B (and the local wine_research tool) report failures as an
+    ``{"error": "..."}`` dict instead of raising; a few list-returning tools can
+    carry per-item error dicts. This lets the loop flag those failures at
+    WARNING so a retrying model isn't sniffing a cold trail unnoticed.
+    """
+    if isinstance(tool_output, dict):
+        err = tool_output.get("error")
+        if err:
+            return str(err)
+    elif isinstance(tool_output, list) and len(tool_output) == 1:
+        # Agent B's list-returning tools signal failure as a SINGLE-element
+        # [{"error": ...}] list. A multi-row list is data — a row that happens
+        # to carry an "error" column (e.g. a log table) must not be flagged.
+        item = tool_output[0]
+        if isinstance(item, dict) and item.get("error"):
+            return str(item["error"])
+    return None
 
 
 def _escape_mrkdwn(s: str) -> str:
