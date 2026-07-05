@@ -105,8 +105,11 @@ class TestErrorVisibility:
         assert "corr=" in warn.getMessage()
         assert result.correlation_id and result.correlation_id in warn.getMessage()
 
-    def test_list_result_with_embedded_error_logs_warning(self, caplog):
-        executor = MagicMock(return_value=[{"ok": 1}, {"error": "partial failure"}])
+    def test_single_element_error_list_logs_warning(self, caplog):
+        # Agent B's list-tools failure convention is a SINGLE-element
+        # [{"error": ...}] list; multi-row lists are data (see
+        # TestReviewFixes.test_multi_row_list_with_error_column_not_flagged).
+        executor = MagicMock(return_value=[{"error": "partial failure"}])
 
         with caplog.at_level(logging.WARNING, logger="nlp"):
             _run_with([_tool_use_response(), _end_turn_response()], executor)
@@ -204,3 +207,101 @@ class TestExitLineClarity:
         result, _ = _run_with(tool_use_with_text, executor)
         assert result.max_steps_hit is True
         assert result.text == "Still working on it..."
+
+
+class TestReviewFixes:
+    """Review fixes: data-row false positives, email masking, isError surfacing."""
+
+    def teardown_method(self):
+        tracing.set_correlation_id(None)
+
+    def test_multi_row_list_with_error_column_not_flagged(self, caplog):
+        # A successful query whose rows happen to carry an "error" DATA column
+        # (e.g. a log table) must not fire the failure WARNING.
+        rows = [
+            {"id": 1, "error": "customer complaint text"},
+            {"id": 2, "error": ""},
+        ]
+        executor = MagicMock(return_value=rows)
+
+        with caplog.at_level(logging.INFO, logger="nlp"):
+            _run_with([_tool_use_response(), _end_turn_response()], executor)
+
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    def test_single_element_error_list_flagged(self, caplog):
+        # Agent B's list-tools failure convention: [{"error": ...}].
+        executor = MagicMock(return_value=[{"error": "Bad Request: syntax error near LIMIT"}])
+
+        with caplog.at_level(logging.INFO, logger="nlp"):
+            _run_with([_tool_use_response(), _end_turn_response()], executor)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings and "syntax error" in warnings[0].getMessage()
+
+    def test_warning_masks_emails_in_error_and_args(self, caplog):
+        # For lookup tools the args ARE the guest's email; the ungated WARNING
+        # must mask local parts in both the error text and the args.
+        block = _tool_use_block(
+            name="lookup_guest_by_email", arguments={"email": "jane.doe@guest.com"}
+        )
+        executor = MagicMock(
+            return_value={"error": "no guest found for jane.doe@guest.com"}
+        )
+
+        with caplog.at_level(logging.INFO, logger="nlp"):
+            _run_with(
+                [_response([block], "tool_use"), _end_turn_response()], executor
+            )
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings
+        msg = warnings[0].getMessage()
+        assert "jane.doe@" not in msg
+        assert "j***@guest.com" in msg
+
+    def test_diagnostics_failure_never_masks_success(self, caplog):
+        # If error-detection itself blows up, the successful result must still
+        # reach the model untouched (the detection block is defensive, outside
+        # the executor try).
+        executor = MagicMock(return_value={"rows": [1, 2, 3]})
+
+        with patch("nlp._extract_tool_error", side_effect=RuntimeError("boom")):
+            with caplog.at_level(logging.DEBUG, logger="nlp"):
+                result, client = _run_with(
+                    [_tool_use_response(), _end_turn_response("Done.")], executor
+                )
+
+        assert result.text == "Done."
+        # The tool_result content passed to Claude is the original payload, not
+        # a synthesized failure.
+        second_call = client.messages.create.call_args_list[1]
+        tool_results = second_call.kwargs["messages"][-1]["content"]
+        assert "failed" not in tool_results[0]["content"]
+        assert "rows" in tool_results[0]["content"]
+
+
+class TestMcpIsError:
+    def test_is_error_plain_text_becomes_error_dict(self):
+        import mcp_client
+
+        result = {
+            "content": [{"type": "text", "text": "Error: record not found"}],
+            "isError": True,
+        }
+        assert mcp_client._extract_content(result) == {"error": "Error: record not found"}
+
+    def test_is_error_existing_error_dict_passes_through(self):
+        import mcp_client
+
+        result = {
+            "content": [{"type": "text", "text": json.dumps({"error": "nope"})}],
+            "isError": True,
+        }
+        assert mcp_client._extract_content(result) == {"error": "nope"}
+
+    def test_normal_result_unaffected(self):
+        import mcp_client
+
+        result = {"content": [{"type": "text", "text": json.dumps([{"id": 1}])}]}
+        assert mcp_client._extract_content(result) == [{"id": 1}]

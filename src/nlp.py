@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -100,6 +101,23 @@ _PAYLOAD_LEVEL = (
     if os.getenv("SABUESO_DEBUG_PAYLOADS", "").strip().lower() in ("1", "true", "yes")
     else logging.DEBUG
 )
+
+# One shared bound for error text: what the failure WARNING logs and what the
+# model receives must stay the same size, or a truncated-error bug report can't
+# be reproduced from the logs.
+_ERR_CLIP = 300
+
+_EMAIL_RE = re.compile(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@")
+
+
+def _mask_emails(text: str) -> str:
+    """Mask the local part of any email address (jane.doe@x.com -> j***@x.com).
+
+    The failure WARNING in run_agent is deliberately ungated (unlike the
+    DEBUG-gated payload lines), and for lookup tools the arguments ARE the
+    guest's email — so mask before logging.
+    """
+    return _EMAIL_RE.sub(r"\1***@", text)
 
 # OPERA guidance is stripped from the prompt when the opera_* tools aren't
 # advertised (OPERA_TOOLS_ENABLED off — see tools_catalog), so the model is
@@ -587,20 +605,6 @@ def run_agent(
                     result_str = result_str[:80_000] + "\n... [truncated]"
                 log.info("  [corr=%s] Step %d Tool %s returned %d chars", turn_id, step, tool_name, len(result_str))
                 log.log(_PAYLOAD_LEVEL, "    result: %.1000s", result_str)
-                # Tools report failure as a {"error": ...} dict (or a list
-                # carrying error dicts) rather than raising, so a failed call
-                # looks identical to a success at INFO and the model retries it
-                # blind. Surface it at WARNING so the failure is visible without
-                # SABUESO_DEBUG_PAYLOADS. This line is deliberately ungated but
-                # only carries the truncated error + args (never the full,
-                # possibly PII-bearing payload, which stays DEBUG above).
-                tool_err = _extract_tool_error(tool_output)
-                if tool_err is not None:
-                    log.warning(
-                        "  [corr=%s] Step %d Tool %s returned an error: %.300s | args=%.300s",
-                        turn_id, step, tool_name, tool_err,
-                        json.dumps(arguments, default=str),
-                    )
             except Exception as e:
                 log.error("  [corr=%s] Step %d Tool %s FAILED: %s", turn_id, step, tool_name, e, exc_info=True)
                 err_type = type(e).__name__
@@ -611,8 +615,29 @@ def run_agent(
                 # (e.g. mcp_client's ValueError), not raw tool output, so it
                 # carries far less PII risk than the full payload.
                 result_str = json.dumps({
-                    "error": f"Tool {tool_name} failed ({err_type}): {str(e)[:300]}"
+                    "error": f"Tool {tool_name} failed ({err_type}): {str(e)[:_ERR_CLIP]}"
                 })
+            else:
+                # Tools report failure as a {"error": ...} dict (or a
+                # single-element [{"error": ...}] list) rather than raising, so
+                # a failed call looks identical to a success at INFO and the
+                # model retries it blind. Surface it at WARNING so the failure
+                # is visible without SABUESO_DEBUG_PAYLOADS. Deliberately
+                # ungated, but emails are masked and only the truncated error +
+                # args are carried (never the full payload, which stays DEBUG
+                # above). Defensive try: diagnostics must never turn a
+                # successful tool call into a reported failure.
+                try:
+                    tool_err = _extract_tool_error(tool_output)
+                    if tool_err is not None:
+                        log.warning(
+                            "  [corr=%s] Step %d Tool %s returned an error: %s | args=%s",
+                            turn_id, step, tool_name,
+                            _mask_emails(str(tool_err)[:_ERR_CLIP]),
+                            _mask_emails(json.dumps(arguments, default=str)[:_ERR_CLIP]),
+                        )
+                except Exception:  # pragma: no cover - diagnostics only
+                    log.debug("    error-detection failed", exc_info=True)
 
             tool_results.append({
                 "type": "tool_result",
@@ -661,10 +686,13 @@ def _extract_tool_error(tool_output: Any) -> str | None:
         err = tool_output.get("error")
         if err:
             return str(err)
-    elif isinstance(tool_output, list):
-        for item in tool_output:
-            if isinstance(item, dict) and item.get("error"):
-                return str(item["error"])
+    elif isinstance(tool_output, list) and len(tool_output) == 1:
+        # Agent B's list-returning tools signal failure as a SINGLE-element
+        # [{"error": ...}] list. A multi-row list is data — a row that happens
+        # to carry an "error" column (e.g. a log table) must not be flagged.
+        item = tool_output[0]
+        if isinstance(item, dict) and item.get("error"):
+            return str(item["error"])
     return None
 
 

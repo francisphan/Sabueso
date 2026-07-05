@@ -195,6 +195,20 @@ def _parse_sse_response(resp: requests.Response, request_id: str):
 
 
 def _extract_content(result: dict):
+    """Extract data from MCP's content wrapper, preserving the isError flag.
+
+    MCP marks tool-level failures with ``isError: true``; the text content is
+    the error message. Convert that into the ``{"error": ...}`` dict convention
+    the agent loop detects — dropping the flag would let a plain-text error
+    pass as a normal-looking result and the model would retry blind.
+    """
+    value = _extract_content_value(result)
+    if result.get("isError") and not (isinstance(value, dict) and value.get("error")):
+        return {"error": value if isinstance(value, str) else json.dumps(value, default=str)}
+    return value
+
+
+def _extract_content_value(result: dict):
     """Extract data from MCP's content wrapper.
 
     MCP tools may return:
