@@ -12,11 +12,9 @@ listed as an allowed callback URL.
 
 import os
 import sys
-import threading
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -80,7 +78,7 @@ def main():
 
     server = HTTPServer(("localhost", PORT), CallbackHandler)
 
-    print(f"Opening browser for Salesforce authorization…")
+    print("Opening browser for Salesforce authorization…")
     print(f"If the browser doesn't open, visit:\n  {auth_url}\n")
     print(f"\nAuth URL:\n{auth_url}\n")
     webbrowser.open(auth_url)

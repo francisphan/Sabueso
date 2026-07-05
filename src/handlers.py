@@ -17,11 +17,10 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import conversation_store
-import permissions
 import pending_ops
 import sf_intents
 from mcp_client import call_tool
