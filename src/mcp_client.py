@@ -10,7 +10,7 @@ import uuid
 
 import requests
 
-from tracing import get_correlation_id
+from tracing import get_correlation_id, get_end_user
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,9 @@ def _headers() -> dict[str, str]:
     cid = get_correlation_id()
     if cid:
         h["X-Correlation-ID"] = cid
+    end_user = get_end_user()
+    if end_user:
+        h["X-End-User"] = end_user
     return h
 
 

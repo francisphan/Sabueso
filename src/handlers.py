@@ -28,6 +28,7 @@ from nlp import AgentResult, run_agent, build_history_from_agent_run, _escape_mr
 from permissions import check_access, parse_admin_command, can_use_tool
 from pending_ops import PendingOp
 from tools_catalog import INTENT_TOOLS
+from tracing import set_end_user
 from wine_enrichment import research_wine_sync
 
 if TYPE_CHECKING:
@@ -227,6 +228,10 @@ def _process_message(
         log.info("Skipping duplicate Slack event %s", dedup_key)
         return
 
+    # Tag every MCP tool call in this turn with the human who triggered it, so
+    # agent-b can attribute the traffic. Reset in the finally so a pooled worker
+    # thread never carries one turn's user into the next.
+    set_end_user(user_id)
     try:
         # Image-only messages have no text — skip the admin-command parse, which
         # only ever matches the leading "!" command syntax anyway.
@@ -295,6 +300,8 @@ def _process_message(
             )
         except Exception:
             log.exception("Failed to send error message to user=%s", user_id)
+    finally:
+        set_end_user(None)
 
 
 def _handle_pending(
@@ -461,6 +468,9 @@ def execute_pending(action_id: str, body: dict, client: "WebClient") -> None:
     started = time.monotonic()
     error_type: str | None = None
     result_text = ""
+    # The intent executor makes the MCP tool calls; attribute them to the
+    # requester (pop_if_authorized has already enforced clicker == requester).
+    set_end_user(op.requester_user_id)
     try:
         result_text = _execute_intent(op, client)
     except Exception as exc:
@@ -470,6 +480,8 @@ def execute_pending(action_id: str, body: dict, client: "WebClient") -> None:
             "Sorry, something went wrong executing that. The error has been "
             "logged for investigation."
         )
+    finally:
+        set_end_user(None)
 
     # Replace the card with a status that reflects what actually happened.
     # An exception clearly failed; a non-ok status result (needs_person_details,
