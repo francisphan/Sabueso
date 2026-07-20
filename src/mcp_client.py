@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 
@@ -20,6 +21,21 @@ MCP_TIMEOUT = int(os.getenv("MCP_TIMEOUT", "30"))
 
 _session_id: str | None = None
 _session_lock = threading.Lock()
+
+# Tools whose names look like mutations. A dead-session retry re-sends the whole
+# request, and for these we can't rule out the first attempt having executed —
+# so they fail fast instead of retrying.
+_WRITE_TOOL_RE = re.compile(r"(?:^|_)(create|update|upsert|delete|bulk)_")
+
+
+class MCPNoResponseError(ValueError):
+    """The SSE stream ended without a response matching our request id.
+
+    Seen in production when the server-side session dies mid-conversation (e.g.
+    an agent-b redeploy): the POST succeeds but the stream carries no matching
+    message. The session is torn down and — for read tools — the call is retried
+    once on a fresh session.
+    """
 
 
 def _headers() -> dict[str, str]:
@@ -150,7 +166,28 @@ def call_tool(tool_name: str, arguments: dict) -> dict | list | str:
 
     resp.raise_for_status()
 
-    result = _parse_sse_response(resp, request_id)
+    try:
+        result = _parse_sse_response(resp, request_id)
+    except MCPNoResponseError:
+        # The stream carried nothing for our request id — the server-side
+        # session likely died (e.g. an agent-b redeploy) after accepting the
+        # POST. Rebuild the session and retry once, but only for read tools:
+        # a write may already have executed on the first attempt.
+        if _WRITE_TOOL_RE.search(tool_name):
+            raise
+        log.warning("MCP response stream empty for %s — re-initializing and retrying once", tool_name)
+        with _session_lock:
+            _session_id = None
+            _initialize()
+        resp = requests.post(
+            _endpoint(),
+            json=payload,
+            headers=_headers(),
+            timeout=MCP_TIMEOUT,
+            stream=True,
+        )
+        resp.raise_for_status()
+        result = _parse_sse_response(resp, request_id)
     # Result bodies carry guest PII / financials — keep the body at DEBUG.
     log.info("MCP result for %s (%d chars)", tool_name, len(str(result)))
     log.debug("MCP result body for %s: %.500s", tool_name, str(result))
@@ -158,8 +195,32 @@ def call_tool(tool_name: str, arguments: dict) -> dict | list | str:
 
 
 def _parse_sse_response(resp: requests.Response, request_id: str):
-    """Parse an SSE event stream and extract the JSON-RPC result."""
+    """Parse an SSE event stream and extract the JSON-RPC result.
+
+    A JSON-RPC *error* that arrives under a different id (or id null — how the
+    server reports a dead/unknown session, since it can't attribute the request)
+    is remembered and surfaced if no proper response ever shows up, instead of
+    the blind "No response received".
+    """
     data_buffer = []
+    stray_error: dict | None = None
+
+    def _handle(raw: str):
+        nonlocal stray_error
+        try:
+            message = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(message, dict):
+            return None
+        if message.get("id") == request_id:
+            if "error" in message:
+                err = message["error"]
+                raise ValueError(f"MCP error {err.get('code')}: {err.get('message')}")
+            return (message.get("result", {}),)
+        if "error" in message and stray_error is None:
+            stray_error = message["error"]
+        return None
 
     for line in resp.iter_lines(decode_unicode=True):
         if line is None:
@@ -170,31 +231,21 @@ def _parse_sse_response(resp: requests.Response, request_id: str):
         elif line == "" and data_buffer:
             raw = "\n".join(data_buffer)
             data_buffer.clear()
-
-            try:
-                message = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-
-            if isinstance(message, dict) and message.get("id") == request_id:
-                if "error" in message:
-                    err = message["error"]
-                    raise ValueError(f"MCP error {err.get('code')}: {err.get('message')}")
-                return _extract_content(message.get("result", {}))
+            hit = _handle(raw)
+            if hit is not None:
+                return _extract_content(hit[0])
 
     if data_buffer:
-        raw = "\n".join(data_buffer)
-        try:
-            message = json.loads(raw)
-            if isinstance(message, dict) and message.get("id") == request_id:
-                if "error" in message:
-                    err = message["error"]
-                    raise ValueError(f"MCP error {err.get('code')}: {err.get('message')}")
-                return _extract_content(message.get("result", {}))
-        except json.JSONDecodeError:
-            pass
+        hit = _handle("\n".join(data_buffer))
+        if hit is not None:
+            return _extract_content(hit[0])
 
-    raise ValueError(f"No response received for request {request_id}")
+    if stray_error is not None:
+        raise MCPNoResponseError(
+            f"No response for request {request_id}; server sent error "
+            f"{stray_error.get('code')}: {stray_error.get('message')}"
+        )
+    raise MCPNoResponseError(f"No response received for request {request_id}")
 
 
 def _extract_content(result: dict):
