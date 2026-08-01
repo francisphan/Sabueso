@@ -127,6 +127,40 @@ class TestHandlerNotifies:
     @patch("handlers._record_metrics")
     @patch("handlers.run_agent")
     @patch("handlers.check_access", return_value="not on my list")
+    @patch("handlers.parse_admin_command")
+    def test_access_probe_from_unknown_user_hits_denial_path(self, mock_adm, _acc,
+                                                             mock_run, _met, monkeypatch):
+        """A non-ACL user sending `!access …` must be denied and alerted on,
+        never routed to the admin command parser."""
+        monkeypatch.setenv("ACCESS_ALERT_USER_IDS", "UADMIN")
+        say, client = MagicMock(), MagicMock()
+        client.users_info.return_value = {"user": {"profile": {}}}
+        event = {"user": "UNOBODY", "channel": "D1", "ts": "5.0",
+                 "text": "!access add <@UNOBODY> admin", "client_msg_id": "d5"}
+        handlers.handle_direct_message(event, say, client)
+
+        mock_adm.assert_not_called()
+        mock_run.assert_not_called()
+        assert "not on my list" in say.call_args.kwargs["text"]
+        client.chat_postMessage.assert_called_once()
+
+    @patch("handlers._record_metrics")
+    @patch("handlers.run_agent")
+    @patch("handlers.check_access", return_value=None)
+    @patch("handlers.parse_admin_command", return_value="Only admins can manage access.")
+    def test_on_acl_user_still_reaches_admin_parser(self, _adm, _acc, mock_run, _met):
+        say, client = MagicMock(), MagicMock()
+        event = {"user": "UREADER", "channel": "D1", "ts": "6.0",
+                 "text": "!access list", "client_msg_id": "d6"}
+        handlers.handle_direct_message(event, say, client)
+
+        mock_run.assert_not_called()
+        assert "Only admins" in say.call_args.kwargs["text"]
+        client.chat_postMessage.assert_not_called()
+
+    @patch("handlers._record_metrics")
+    @patch("handlers.run_agent")
+    @patch("handlers.check_access", return_value="not on my list")
     @patch("handlers.parse_admin_command", return_value=None)
     def test_slack_failure_never_breaks_denial_reply(self, _adm, _acc, mock_run, _met,
                                                      monkeypatch):
