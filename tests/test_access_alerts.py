@@ -42,6 +42,30 @@ class TestRecordDeniedAttempt:
         assert access_alerts.record_denied_attempt("U2", now=1.0) == 1
 
 
+# ── Cooldown env parsing ───────────────────────────────────────────────────
+
+class TestCooldownFromEnv:
+    def test_unset_uses_default(self, monkeypatch):
+        monkeypatch.delenv("ACCESS_ALERT_COOLDOWN_SECONDS", raising=False)
+        assert access_alerts._cooldown_from_env() == access_alerts._DEFAULT_COOLDOWN_SECONDS
+
+    def test_valid_value_is_used(self, monkeypatch):
+        monkeypatch.setenv("ACCESS_ALERT_COOLDOWN_SECONDS", "120")
+        assert access_alerts._cooldown_from_env() == 120.0
+
+    def test_zero_disables_throttling(self, monkeypatch):
+        monkeypatch.setenv("ACCESS_ALERT_COOLDOWN_SECONDS", "0")
+        assert access_alerts._cooldown_from_env() == 0.0
+
+    def test_garbage_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("ACCESS_ALERT_COOLDOWN_SECONDS", "1h")
+        assert access_alerts._cooldown_from_env() == access_alerts._DEFAULT_COOLDOWN_SECONDS
+
+    def test_negative_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("ACCESS_ALERT_COOLDOWN_SECONDS", "-5")
+        assert access_alerts._cooldown_from_env() == access_alerts._DEFAULT_COOLDOWN_SECONDS
+
+
 # ── Recipients ─────────────────────────────────────────────────────────────
 
 class TestAlertRecipients:

@@ -10,6 +10,7 @@ a restart just means one extra notice, which is harmless.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -18,7 +19,35 @@ from dataclasses import dataclass
 import permissions
 from nlp import _escape_mrkdwn
 
-_COOLDOWN_SECONDS = float(os.getenv("ACCESS_ALERT_COOLDOWN_SECONDS", "3600"))
+log = logging.getLogger(__name__)
+
+_DEFAULT_COOLDOWN_SECONDS = 3600.0
+
+
+def _cooldown_from_env() -> float:
+    """Parse ACCESS_ALERT_COOLDOWN_SECONDS, falling back on garbage.
+
+    A malformed value must not crash the bot at import time — alerting is a
+    side feature; degrade to the default and say so.
+    """
+    raw = os.getenv("ACCESS_ALERT_COOLDOWN_SECONDS", "").strip()
+    if not raw:
+        return _DEFAULT_COOLDOWN_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if value < 0:
+        log.warning(
+            "Invalid ACCESS_ALERT_COOLDOWN_SECONDS %r — using default %ss",
+            raw,
+            int(_DEFAULT_COOLDOWN_SECONDS),
+        )
+        return _DEFAULT_COOLDOWN_SECONDS
+    return value
+
+
+_COOLDOWN_SECONDS = _cooldown_from_env()
 
 
 @dataclass
