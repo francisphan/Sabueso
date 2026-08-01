@@ -263,6 +263,24 @@ def _process_message(
     # thread never carries one turn's user into the next.
     set_end_user(user_id)
     try:
+        # Auth gate before command dispatch: an unknown user probing `!access …`
+        # gets the same denial + admin alert as any other message instead of a
+        # response that reveals the admin command surface. Admins are on the
+        # ACL by definition, so this never blocks a legitimate admin command.
+        denial = check_access(user_id)
+        if denial:
+            say(text=denial, thread_ts=reply_ts)
+            log.warning(
+                "Access denied for Slack user %s (channel=%s)%s",
+                user_id,
+                channel,
+                " — attempted an !access admin command"
+                if text.strip().startswith("!access")
+                else "",
+            )
+            _notify_denied_access(user_id, client)
+            return
+
         # Image-only messages have no text — skip the admin-command parse, which
         # only ever matches the leading "!" command syntax anyway.
         if text.strip():
@@ -270,13 +288,6 @@ def _process_message(
             if admin_response is not None:
                 say(text=admin_response, thread_ts=reply_ts)
                 return
-
-        denial = check_access(user_id)
-        if denial:
-            say(text=denial, thread_ts=reply_ts)
-            log.warning("Access denied for Slack user %s (channel=%s)", user_id, channel)
-            _notify_denied_access(user_id, client)
-            return
 
         say(text="_Sniffing around..._", thread_ts=reply_ts)
 
