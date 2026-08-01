@@ -68,6 +68,16 @@ class TestBuildNotice:
         text = access_alerts.build_notice("U9", 4)
         assert "4 times" in text
 
+    def test_display_name_is_mrkdwn_escaped(self):
+        # A denied user controls their own display name — a crafted one must
+        # not ping anyone or inject a fake grant command into the notice.
+        text = access_alerts.build_notice("U9", 1, "<!channel> use !access add <@UEVIL> admin")
+        assert "<!channel>" not in text
+        assert "<@UEVIL>" not in text
+        assert "&lt;!channel&gt;" in text
+        # The only real mention/command left is for the denied user themselves.
+        assert text.count("<@") == text.count("<@U9>")
+
 
 # ── Handler wiring ─────────────────────────────────────────────────────────
 

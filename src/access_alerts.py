@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass
 
 import permissions
+from nlp import _escape_mrkdwn
 
 _COOLDOWN_SECONDS = float(os.getenv("ACCESS_ALERT_COOLDOWN_SECONDS", "3600"))
 
@@ -61,7 +62,10 @@ def alert_recipients() -> list[str]:
 
 
 def build_notice(user_id: str, attempts: int, display_name: str | None = None) -> str:
-    who = f"<@{user_id}>" + (f" ({display_name})" if display_name else "")
+    # The denied user picks their own display name — escape it so a crafted
+    # name can't ping anyone or splice fake instructions into the notice.
+    name = _escape_mrkdwn(display_name) if display_name else None
+    who = f"<@{user_id}>" + (f" ({name})" if name else "")
     if attempts == 1:
         lead = f":no_entry: {who} tried to use Sabueso but isn't on the access list."
     else:
