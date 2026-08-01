@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+import access_alerts
 import conversation_store
 import pending_ops
 import sf_intents
@@ -208,6 +209,35 @@ def handle_mention(event: dict, say, client: "WebClient"):
 
 # ── Core pipeline ───────────────────────────────────────────────────────────
 
+def _notify_denied_access(user_id: str, client: "WebClient") -> None:
+    """DM the alert recipients when a non-ACL user knocks (throttled per user).
+
+    Best-effort: a Slack failure here must never break the denial reply the
+    knocking user already got.
+    """
+    try:
+        attempts = access_alerts.record_denied_attempt(user_id)
+        if attempts is None:
+            return
+        display_name = None
+        try:
+            info = client.users_info(user=user_id)
+            profile = (info.get("user") or {}).get("profile") or {}
+            display_name = (
+                profile.get("display_name") or profile.get("real_name") or None
+            )
+        except Exception:
+            log.info("Could not resolve profile for denied user %s", user_id)
+        notice = access_alerts.build_notice(user_id, attempts, display_name)
+        for admin_id in access_alerts.alert_recipients():
+            try:
+                client.chat_postMessage(channel=admin_id, text=notice)
+            except Exception:
+                log.exception("Failed to DM %s about denied access", admin_id)
+    except Exception:
+        log.exception("Denied-access notification failed")
+
+
 def _process_message(
     text: str,
     user_id: str,
@@ -244,6 +274,8 @@ def _process_message(
         denial = check_access(user_id)
         if denial:
             say(text=denial, thread_ts=reply_ts)
+            log.warning("Access denied for Slack user %s (channel=%s)", user_id, channel)
+            _notify_denied_access(user_id, client)
             return
 
         say(text="_Sniffing around..._", thread_ts=reply_ts)
