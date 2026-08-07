@@ -24,6 +24,7 @@ SELECT Guest_First_Name__c, Guest_Last_Name__c, Email__c,
        City__c, State_Province__c, Country__c, Language__c,
        Contact__c,
        Contact__r.AccountId,
+       Contact__r.Account.Historical_Contact_Id__c,
        Contact__r.Account.Description,
        Contact__r.Account.PersonTitle,
        Contact__r.Account.Website,
@@ -106,6 +107,12 @@ def fetch_upcoming_guests() -> list[dict]:
             "language": rec.get("Language__c", ""),
             "contact_id": rec.get("Contact__c", ""),
             "account_id": _nested_get(rec, "Contact__r", "AccountId") or "",
+            # Old-org Contact id preserved at migration — NetSuite's
+            # custentity_vom_salesforceid stores these (15-char form), so this
+            # is the identity link for wine-owner matching.
+            "historical_contact_id": (
+                _nested_get(rec, "Contact__r", "Account", "Historical_Contact_Id__c") or ""
+            ),
             "account_description": _nested_get(rec, "Contact__r", "Account", "Description") or "",
             "account_title": _nested_get(rec, "Contact__r", "Account", "PersonTitle") or "",
             "account_website": _nested_get(rec, "Contact__r", "Account", "Website") or "",

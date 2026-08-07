@@ -20,6 +20,24 @@ class TestCleanEmail:
         assert we._clean_email(None) is None
 
 
+class TestCleanHistoricalContactId:
+    def test_18_char_id_truncated_to_15(self):
+        assert we._clean_historical_contact_id("003i000000GwGGSAA3") == "003i000000GwGGS"
+
+    def test_15_char_id_kept(self):
+        assert we._clean_historical_contact_id("003i000000GwGGS") == "003i000000GwGGS"
+
+    def test_rejects_non_contact_prefix(self):
+        # 001 = Account. NetSuite's field only ever holds Contact (003) ids.
+        assert we._clean_historical_contact_id("001i000000LYkaBAAT") is None
+
+    def test_rejects_garbage_and_empty(self):
+        assert we._clean_historical_contact_id("Robert'); DROP") is None
+        assert we._clean_historical_contact_id("003i00") is None
+        assert we._clean_historical_contact_id("") is None
+        assert we._clean_historical_contact_id(None) is None
+
+
 class TestWinemakerQuery:
     def test_matches_primary_and_secondary_email(self):
         q = we._winemaker_query("bob@example.com")
@@ -27,6 +45,16 @@ class TestWinemakerQuery:
         assert "custentity_vom_winebrandname IS NOT NULL" in q
         assert "LOWER(email) = 'bob@example.com'" in q
         assert "LOWER(custentity_secondaryemail) = 'bob@example.com'" in q
+
+    def test_matches_historical_contact_id(self):
+        q = we._winemaker_query(None, "003i000000GwGGS")
+        assert "SUBSTR(custentity_vom_salesforceid, 1, 15) = '003i000000GwGGS'" in q
+        assert "LOWER(email)" not in q
+
+    def test_combines_both_keys_with_or(self):
+        q = we._winemaker_query("bob@example.com", "003i000000GwGGS")
+        assert "SUBSTR(custentity_vom_salesforceid, 1, 15) = '003i000000GwGGS'" in q
+        assert "OR LOWER(email) = 'bob@example.com'" in q
 
 
 class TestRowsFromResult:
@@ -130,7 +158,38 @@ class TestFindWinemaker:
             "customer_name": "Weitzman, Sergio",
             "brand": "SERCA",
             "owner_code": "WEIS",
+            "matched_by": "email",
         }
+
+    def test_sf_id_match_wins_over_email_row_order(self, monkeypatch):
+        # When both keys hit (different rows), the identity match is the
+        # guest's own record — an email hit could be a shared/household inbox.
+        rows = [
+            {"id": "1", "companyname": "Email Hit", "brand": "A", "owner_code": "X",
+             "salesforce_id": None},
+            {"id": "2", "companyname": "Id Hit", "brand": "B", "owner_code": "Y",
+             "salesforce_id": "003i000000GwGGS"},
+        ]
+        monkeypatch.setattr(we, "call_tool", lambda *a, **k: rows)
+        out = we.find_winemaker("shared@example.com", "003i000000GwGGSAA3")
+        assert out["customer_id"] == "2"
+        assert out["matched_by"] == "salesforce_id"
+
+    def test_sf_id_only_lookup_when_email_unusable(self, monkeypatch):
+        # The identity link must work even when Salesforce has no clean email
+        # for the guest — this is exactly the false-negative class from #15.
+        captured = {}
+
+        def fake_call(tool, args):
+            captured["query"] = args["query"]
+            return [{"id": "9", "companyname": "Alvarez, Ricardo", "brand": "Regis",
+                     "owner_code": "ALVR", "salesforce_id": "003i000000J2bPj"}]
+
+        monkeypatch.setattr(we, "call_tool", fake_call)
+        out = we.find_winemaker("not-an-email", "003i000000J2bPjAAJ")
+        assert "SUBSTR(custentity_vom_salesforceid, 1, 15)" in captured["query"]
+        assert "LOWER(email)" not in captured["query"]
+        assert out["matched_by"] == "salesforce_id"
 
     def test_returns_none_when_no_rows(self, monkeypatch):
         monkeypatch.setattr(we, "call_tool", lambda *a, **k: [])
@@ -142,6 +201,7 @@ class TestFindWinemaker:
 
         monkeypatch.setattr(we, "call_tool", boom)
         assert we.find_winemaker("not-an-email") is None
+        assert we.find_winemaker("not-an-email", "bad-id") is None
 
     def test_swallows_mcp_errors(self, monkeypatch):
         def boom(*a, **k):

@@ -4,11 +4,16 @@ Two best-effort capabilities, shared by the guest-report pipeline (async) and
 the Slack sommelier bot (sync). Both degrade silently on failure so they can
 never break the main flow.
 
-1. ``find_winemaker(email)`` — ask Agent B (NetSuite, via the MCP server)
-   whether an arriving guest is one of The Vines' wine owners, by matching their
-   email against the customer table's brand-bearing records. Email-exact only:
-   a fuzzy name match could falsely brand a guest a winemaker in a staff report,
-   which is worse than missing one.
+1. ``find_winemaker(email, historical_contact_id)`` — ask Agent B (NetSuite,
+   via the MCP server) whether an arriving guest is one of The Vines' wine
+   owners, by matching against the customer table's brand-bearing records on
+   two exact keys: the old-org Salesforce Contact id (NetSuite's
+   custentity_vom_salesforceid stores 15-char ids from the pre-migration org,
+   preserved on Account.Historical_Contact_Id__c — an identity link, catches
+   owners whose emails differ between systems) and the guest's email against
+   primary/secondary email. Exact matches only: a fuzzy name match could
+   falsely brand a guest a winemaker in a staff report, which is worse than
+   missing one.
 
 2. ``research_wine(brand, ...)`` — Gemini + Google Search grounding to pull
    PUBLIC info about a wine (style, tasting notes, blend, ratings, producer
@@ -66,16 +71,43 @@ def _clean_email(email: str | None) -> str | None:
     return e
 
 
-def _winemaker_query(email: str) -> str:
-    """SuiteQL: brand-bearing customer whose primary OR secondary email matches."""
+def _clean_historical_contact_id(value: str | None) -> str | None:
+    """First 15 chars of an old-org Salesforce Contact id, or None if unusable.
+
+    NetSuite's custentity_vom_salesforceid holds 15-char Contact ids from the
+    pre-migration Salesforce org; Account.Historical_Contact_Id__c holds the
+    18-char form (last 3 chars are a checksum suffix), so compare on the first
+    15. The strict alnum shape also makes the value safe to inline in SuiteQL.
+    """
+    if not value:
+        return None
+    v = value.strip()
+    if not re.fullmatch(r"003[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?", v):
+        return None
+    return v[:15]
+
+
+def _winemaker_query(email: str | None, historical_contact_id: str | None = None) -> str:
+    """SuiteQL: brand-bearing customer matched by old-org SF Contact id or email.
+
+    Caller must pass at least one already-cleaned key.
+    """
+    clauses = []
+    if historical_contact_id:
+        clauses.append(
+            f"SUBSTR(custentity_vom_salesforceid, 1, 15) = '{historical_contact_id}'"
+        )
+    if email:
+        clauses.append(f"LOWER(email) = '{email}'")
+        clauses.append(f"LOWER(custentity_secondaryemail) = '{email}'")
     return (
         "SELECT id, entityid, companyname, "
         "custentity_vom_winebrandname AS brand, "
-        "custentity_vom_ownercode AS owner_code "
+        "custentity_vom_ownercode AS owner_code, "
+        "custentity_vom_salesforceid AS salesforce_id "
         "FROM customer "
         "WHERE custentity_vom_winebrandname IS NOT NULL "
-        f"AND (LOWER(email) = '{email}' "
-        f"OR LOWER(custentity_secondaryemail) = '{email}')"
+        f"AND ({' OR '.join(clauses)})"
     )
 
 
@@ -97,19 +129,22 @@ def _rows_from_result(res) -> list[dict]:
     return [r for r in rows if isinstance(r, dict) and "error" not in r]
 
 
-def find_winemaker(email: str | None) -> dict | None:
+def find_winemaker(email: str | None, historical_contact_id: str | None = None) -> dict | None:
     """Return the guest's wine-owner record from NetSuite, or None.
 
-    Synchronous (uses the requests-based MCP client). Best-effort: any failure
-    is logged and swallowed, returning None.
+    Matches on the old-org Salesforce Contact id (identity link — catches
+    owners whose NetSuite email differs from Salesforce) and on primary /
+    secondary email. Synchronous (uses the requests-based MCP client).
+    Best-effort: any failure is logged and swallowed, returning None.
     """
     if not ENABLED:
         return None
     clean = _clean_email(email)
-    if not clean:
+    hist_id = _clean_historical_contact_id(historical_contact_id)
+    if not clean and not hist_id:
         return None
     try:
-        res = call_tool("ns_suiteql_query", {"query": _winemaker_query(clean)})
+        res = call_tool("ns_suiteql_query", {"query": _winemaker_query(clean, hist_id)})
     except Exception as exc:  # noqa: BLE001 — enrichment must never break the report
         log.warning("Winemaker lookup failed for %s: %s", email, exc)
         return None
@@ -117,12 +152,21 @@ def find_winemaker(email: str | None) -> dict | None:
     rows = _rows_from_result(res)
     if not rows:
         return None
+    # Prefer the identity (SF id) match if both keys hit different rows.
     row = rows[0]
+    matched_by = "email"
+    if hist_id:
+        for r in rows:
+            if str(r.get("salesforce_id") or "")[:15] == hist_id:
+                row = r
+                matched_by = "salesforce_id"
+                break
     return {
         "customer_id": row.get("id"),
         "customer_name": row.get("companyname") or row.get("entityid"),
         "brand": (row.get("brand") or "").strip(),
         "owner_code": row.get("owner_code"),
+        "matched_by": matched_by,
     }
 
 
@@ -277,15 +321,18 @@ async def attach_wine_owner(profiled: dict, gemini=None) -> dict:
     email = profiled.get("email")
     full_name = f"{profiled.get('first_name', '')} {profiled.get('last_name', '')}".strip()
     try:
-        owner = await asyncio.to_thread(find_winemaker, email)
+        owner = await asyncio.to_thread(
+            find_winemaker, email, profiled.get("historical_contact_id")
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("Winemaker enrichment errored for %s: %s", full_name or email, exc)
         return profiled
     if not owner:
         return profiled
 
-    log.info("  %s is a wine owner (brand=%r, code=%s).",
-             full_name or email, owner.get("brand"), owner.get("owner_code"))
+    log.info("  %s is a wine owner (brand=%r, code=%s, matched_by=%s).",
+             full_name or email, owner.get("brand"), owner.get("owner_code"),
+             owner.get("matched_by"))
     winemaker = dict(owner)
     brand = owner.get("brand") or ""
     if _is_researchable_brand(brand):
