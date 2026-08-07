@@ -97,6 +97,16 @@ def main():
     print(f"SF_REFRESH_TOKEN={tokens['refresh_token']}")
     print(f"SF_INSTANCE_URL={tokens['instance_url']}")
     print("\nAdd the lines above to your .env file.")
+    print(
+        "\nIMPORTANT: minting a new token can orphan the previous one. Update the\n"
+        "refresh token EVERYWHERE it is stored, or the other consumers break\n"
+        "silently (this caused a 6-week Guest Report outage in 2026 — issue #37):\n"
+        "  - .env (local runs)\n"
+        "  - GitHub Actions secret SF_REFRESH_TOKEN\n"
+        "    (repo Settings > Secrets and variables > Actions — used by the\n"
+        "    scheduled Guest Report workflow)\n"
+        "  - Railway env vars, if the token is set there"
+    )
 
 
 if __name__ == "__main__":
