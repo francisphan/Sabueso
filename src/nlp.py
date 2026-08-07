@@ -467,6 +467,38 @@ def _build_user_content(message: str, images: list[dict] | None) -> Any:
     return blocks
 
 
+def _friendly_api_error(exc: anthropic.APIError, turn_id: str) -> str:
+    """Turn an Anthropic API failure into a Slack-safe, actionable message.
+
+    The raw exception (a JSON wall with request ids for HTTP errors) goes to
+    the logs, never to the channel. The user gets what happened, what to do
+    about it, and the turn's correlation id so an admin can find the log lines.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(exc, anthropic.RateLimitError):
+        detail = "I'm being rate-limited by the Claude API right now"
+        action = "Wait a minute, then resend your message"
+    elif isinstance(exc, anthropic.APIConnectionError):
+        detail = "I couldn't reach the Claude API (network hiccup)"
+        action = "Resend your message in a moment"
+    elif isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        detail = "my Claude API credentials were rejected"
+        action = "Ask an admin to check the ANTHROPIC_API_KEY on the bot"
+    elif status is not None and status >= 500:
+        detail = "the Claude API is overloaded or having a server-side problem"
+        action = "Resend your message in a minute or two"
+    elif isinstance(exc, anthropic.BadRequestError):
+        detail = "the Claude API rejected this request"
+        action = (
+            "If this is a long-running thread, start a fresh one — the "
+            "conversation may have outgrown the model's limit"
+        )
+    else:
+        detail = f"the Claude API call failed ({type(exc).__name__})"
+        action = "Try again, and tell an admin if it keeps happening"
+    return f"Sorry — {detail}. {action}. _(logged, ref `{turn_id}`)_"
+
+
 def run_agent(
     message: str,
     tool_executor: Callable[[str, dict], Any],
@@ -526,7 +558,7 @@ def run_agent(
         except anthropic.APIError as exc:
             log.exception("Claude API error at step %d", step)
             result.error_type = type(exc).__name__
-            result.text = f"Sorry, I hit a snag: `{exc}`"
+            result.text = _friendly_api_error(exc, turn_id)
             return result
 
         usage = response.usage

@@ -334,11 +334,15 @@ def _process_message(
                 message_text=text,
             )
 
-    except Exception:
+    except Exception as exc:
         log.exception("Unhandled error processing message from user=%s", user_id)
         try:
             say(
-                text="Sorry, something went wrong on my end. Please try again.",
+                text=(
+                    "Sorry — something went wrong on my end "
+                    f"(`{type(exc).__name__}`). It's been logged; try again, and "
+                    "tell an admin if it keeps happening."
+                ),
                 thread_ts=reply_ts,
             )
         except Exception:
@@ -520,8 +524,9 @@ def execute_pending(action_id: str, body: dict, client: "WebClient") -> None:
         log.exception("execute_pending failed for tool=%s", op.tool_name)
         error_type = type(exc).__name__
         result_text = (
-            "Sorry, something went wrong executing that. The error has been "
-            "logged for investigation."
+            f"⚠️ Sorry — that action failed partway (`{error_type}`). It's been "
+            "logged. Check the record in Salesforce before retrying, in case "
+            "part of it (e.g. the opportunity without its touches) was created."
         )
     finally:
         set_end_user(None)
