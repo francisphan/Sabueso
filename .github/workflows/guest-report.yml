@@ -39,3 +39,33 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_REVIEW_CHANNEL: ${{ secrets.SLACK_REVIEW_CHANNEL }}
         run: python3 src/main.py --now
+
+      # Failures of the scheduled report must reach a human — a stale
+      # SF_REFRESH_TOKEN repo secret once broke this silently for 6 weeks
+      # (issue #37).
+      - name: Alert Slack on failure
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_REVIEW_CHANNEL: ${{ secrets.SLACK_REVIEW_CHANNEL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          payload=$(jq -n --arg channel "$SLACK_REVIEW_CHANNEL" --arg url "$RUN_URL" '
+            {
+              channel: $channel,
+              unfurl_links: false,
+              text: (
+                ":rotating_light: *Guest Report run failed.* <" + $url + "|View logs>\n" +
+                "• Most likely culprit (caused the silent May–Jul 2026 outage): stale `SF_REFRESH_TOKEN` repo secret — Salesforce 400s on the refresh grant.\n" +
+                "• Fix: `python scripts/get_salesforce_token.py`, then update the *GitHub Actions secret* `SF_REFRESH_TOKEN` (repo Settings → Secrets and variables → Actions) — updating `.env`/Railway alone is not enough.\n" +
+                "• No retry until the next scheduled run (Mon/Thu 08:00 UTC) — re-run from the Actions tab once fixed."
+              )
+            }')
+          resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            --data "$payload")
+          echo "$resp"
+          # Fail the step if Slack rejected the message so the alert being
+          # broken is itself visible in the workflow annotations.
+          [ "$(echo "$resp" | jq -r .ok)" = "true" ]
