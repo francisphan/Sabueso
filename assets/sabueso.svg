@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs><clipPath id="c"><circle cx="256" cy="256" r="252"/></clipPath></defs>
+  <circle cx="256" cy="256" r="252" fill="#2E7D74"/>
+  <g clip-path="url(#c)" stroke-linejoin="round">
+    <!-- neck and chest -->
+    <path d="M190,380 C184,440 156,480 118,520 L394,520 C356,480 328,440 322,380 Z" fill="#9A5532"/>
+    <path d="M222,452 C214,480 204,502 194,520 L318,520 C308,502 298,480 290,452 Z" fill="#F7F3EC"/>
+    <g transform="translate(256 262) scale(0.98 0.86) translate(-256 -262)">
+    <!-- big ears: wider than the head, hanging past the jaw, flaring out at the bottom -->
+    <path d="M178,118 C128,124 96,170 88,240 C80,310 70,370 62,420 C74,462 140,474 196,448 C206,390 204,300 196,210 Z" fill="#5C3220" stroke="#5C3220" stroke-width="12"/>
+    <path d="M334,118 C384,124 416,170 424,240 C432,310 442,370 450,420 C438,462 372,474 316,448 C306,390 308,300 316,210 Z" fill="#5C3220" stroke="#5C3220" stroke-width="12"/>
+    <path d="M62,420 C74,462 140,474 196,448 C160,456 104,450 80,404 Z" fill="#7A4226"/>
+    <path d="M450,420 C438,462 372,474 316,448 C352,456 408,450 432,404 Z" fill="#7A4226"/>
+    <g transform="translate(256 0) scale(1.16 1) translate(-256 0)">
+    <!-- head: rounded top, long sides, cheeks hanging beside the jowls -->
+    <path d="M224,82 Q256,72 288,82 C320,94 334,140 344,206 C352,276 370,334 364,390 Q352,412 320,410 L192,410 Q160,412 148,390 C142,334 160,276 162,206 C178,140 192,94 224,82 Z" fill="#A8603A" stroke="#A8603A" stroke-width="10"/>
+    <!-- cheek folds -->
+    <path d="M182,268 C176,306 176,342 182,372" fill="none" stroke="#7E4426" stroke-width="7" stroke-linecap="round"/>
+    <path d="M330,268 C336,306 336,342 330,372" fill="none" stroke="#7E4426" stroke-width="7" stroke-linecap="round"/>
+    <!-- red bandana, as on Loui -->
+    <path d="M160,430 Q256,468 352,430 L256,520 Z" fill="#D62830" stroke="#D62830" stroke-width="14"/>
+    <path d="M346,434 L388,404 L394,432 Z" fill="#D62830" stroke="#D62830" stroke-width="8"/>
+    <path d="M346,436 L392,456 L376,472 Z" fill="#D62830" stroke="#D62830" stroke-width="8"/>
+    <circle cx="348" cy="434" r="15" fill="#B01E26"/>
+    <!-- wide cream blaze, top to bottom, ending in two hanging jowls -->
+    <path d="M232,90 Q256,84 280,90 C290,150 298,200 306,250 C316,300 342,338 344,394 Q346,454 294,458 Q280,460 280,430 Q280,396 256,392 Q232,396 232,430 Q232,460 218,458 Q166,454 168,394 C172,336 196,300 206,250 C214,200 222,150 232,90 Z" fill="#F7F3EC" stroke="#F7F3EC" stroke-width="8"/>
+    <!-- eyes, high and just outside the blaze -->
+    <!-- big nose, low on the face -->
+    <path d="M220,300 L292,300 Q302,322 282,344 L230,344 Q210,322 220,300 Z" fill="#1E2029" stroke="#1E2029" stroke-width="8"/>
+    <!-- mouth: a line down into the notch between the jowls -->
+    <path d="M256,346 L256,390" stroke="#1E2029" stroke-width="7" stroke-linecap="round"/>
+    </g>
+    <circle cx="179" cy="222" r="15" fill="#1E2029"/>
+    <circle cx="333" cy="222" r="15" fill="#1E2029"/>
+    </g>
+  </g>
+</svg>
